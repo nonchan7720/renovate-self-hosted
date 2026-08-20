@@ -10,8 +10,14 @@ DRY_RUN is on: deliveries are logged and nothing is dispatched.
 Webhook URL to configure in GitHub:
 {{- if .Values.ingress.enabled }}
 {{- range $host := .Values.ingress.hosts }}
-{{- range .paths }}
-  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+{{- $scheme := "http" }}
+{{- range $tls := $.Values.ingress.tls }}
+{{- if and $tls.hosts (has $host.host $tls.hosts) }}
+{{- $scheme = "https" }}
+{{- end }}
+{{- end }}
+{{- range $host.paths }}
+  {{ $scheme }}://{{ $host.host }}{{ .path }}
 {{- end }}
 {{- end }}
 {{- else }}
