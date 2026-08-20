@@ -1,0 +1,53 @@
+{{- include "renovate-webhook.validate" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "renovate-webhook.fullname" . }}
+  labels:
+    {{- include "renovate-webhook.labels" . | nindent 4 }}
+data:
+  RENOVATE_WEBHOOK_ADDR: ":{{ .Values.containerPort }}"
+  RUNNER_REPOSITORY: {{ .Values.config.runnerRepository | quote }}
+  {{- with .Values.config.runnerWorkflow }}
+  RUNNER_WORKFLOW: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.runnerRef }}
+  RUNNER_REF: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.runnerRepositoryInput }}
+  RUNNER_REPOSITORY_INPUT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.runnerExtraInputs }}
+  RUNNER_EXTRA_INPUTS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.githubApiUrl }}
+  GITHUB_API_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.path }}
+  RENOVATE_WEBHOOK_PATH: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.logLevel }}
+  RENOVATE_WEBHOOK_LOG_LEVEL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.shutdownTimeout }}
+  RENOVATE_WEBHOOK_SHUTDOWN_TIMEOUT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.botLogins }}
+  RENOVATE_BOT_LOGINS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.allowedRepositories }}
+  ALLOWED_REPOSITORIES: {{ . | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.config.triggerOnPush) "" }}
+  TRIGGER_ON_PUSH: {{ .Values.config.triggerOnPush | quote }}
+  {{- end }}
+  {{- with .Values.config.pushConfigPaths }}
+  PUSH_CONFIG_PATHS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.debounceWindow }}
+  DEBOUNCE_WINDOW: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.debounceMaxWait }}
+  DEBOUNCE_MAX_WAIT: {{ . | quote }}
+  {{- end }}
+  DRY_RUN: {{ .Values.config.dryRun | quote }}

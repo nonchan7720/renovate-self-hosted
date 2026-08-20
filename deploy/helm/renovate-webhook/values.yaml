@@ -1,0 +1,141 @@
+# The service keeps its debounce state in memory, so each replica coalesces
+# only the events it received itself. Two replicas can therefore dispatch two
+# runs for the same repository; the runner workflow serialises them with a
+# concurrency group, so the cost is an extra run rather than a race. Keep this
+# at 1 unless you need the availability more than the coalescing.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/nonchan7720/renovate-self-hosted
+  pullPolicy: IfNotPresent
+  # Defaults to the chart's appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Port the container listens on. The service and probes follow it.
+containerPort: 8080
+
+serviceAccount:
+  create: true
+  # The service only talks to the GitHub API, so it never needs a token.
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Matches the nonroot user in the distroless base image.
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: renovate-webhook.example.com
+      paths:
+        - path: /webhook
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    # No CPU limit on purpose: the work is bursty and short, and throttling a
+    # webhook handler only makes GitHub time the delivery out.
+    memory: 128Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 10
+
+# Long enough for shutdownTimeout plus a dispatch that is already in flight,
+# so a checkbox ticked moments before a rollout is not dropped.
+terminationGracePeriodSeconds: 60
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# Secrets. Point at a secret you already manage (recommended, and what an
+# external secrets operator or SOPS would produce), or let the chart create
+# one from the values below.
+secret:
+  # Name of an existing secret holding the webhook secret and GitHub token.
+  # Its keys are read individually, so they can be named anything as long as
+  # the two key settings below match.
+  existingSecret: ""
+  webhookSecretKey: RENOVATE_WEBHOOK_SECRET
+  githubTokenKey: GITHUB_TOKEN
+  # Used only when existingSecret is empty.
+  create: true
+  webhookSecret: ""
+  githubToken: ""
+
+# Everything else maps to the service's environment variables. Empty values
+# are left out so the binary's own defaults apply.
+config:
+  # Required: owner/repo of the repository holding the Renovate runner
+  # workflow.
+  runnerRepository: ""
+  runnerWorkflow: ""
+  runnerRef: ""
+  runnerRepositoryInput: ""
+  # Extra workflow inputs as "key=value,key=value". The workflow must declare
+  # every input, otherwise GitHub rejects the dispatch.
+  runnerExtraInputs: ""
+  # Set to https://<host>/api/v3 for GitHub Enterprise Server.
+  githubApiUrl: ""
+  path: ""
+  logLevel: ""
+  shutdownTimeout: ""
+  botLogins: ""
+  allowedRepositories: ""
+  triggerOnPush: ""
+  pushConfigPaths: ""
+  debounceWindow: ""
+  debounceMaxWait: ""
+  # Log what would be dispatched instead of calling GitHub.
+  dryRun: false
+
+# Additional environment variables, for anything the chart does not model.
+extraEnv: []
+extraEnvFrom: []

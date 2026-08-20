@@ -1,5 +1,6 @@
 .git
 .github
+deploy
 .golangci.yml
 Dockerfile
 README.md
