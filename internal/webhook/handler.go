@@ -129,6 +129,11 @@ func (h *Handler) handleIssues(delivery string, body []byte, logger *slog.Logger
 	if !h.trigger.IsBot(ev.Issue.User.Login) {
 		return result{Status: statusIgnored, Reason: "issue is not owned by Renovate"}, nil
 	}
+	// Closing the Dependency Dashboard is how a repository opts out, so an
+	// edit to a closed one is not a request to run.
+	if ev.Issue.State != "" && ev.Issue.State != "open" {
+		return result{Status: statusIgnored, Reason: "issue is " + ev.Issue.State}, nil
+	}
 	if res, ok := h.checkEditable(ev.Repository, ev.Sender, ev.Changes); !ok {
 		return res, nil
 	}

@@ -212,6 +212,14 @@ func TestHandlerIgnoredDeliveries(t *testing.T) {
 				AllowedRepositories: []string{"other/repo"},
 			},
 		},
+		"closed dependency dashboard": {
+			event: "issues",
+			payload: func() map[string]any {
+				p := issuePayload("edited", "alice", dashboardBody, ticked)
+				p["issue"].(map[string]any)["state"] = "closed"
+				return p
+			}(),
+		},
 		"closed pull request": {
 			event: "pull_request",
 			payload: func() map[string]any {
