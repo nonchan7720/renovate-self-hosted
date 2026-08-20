@@ -1,0 +1,291 @@
+package webhook
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"slices"
+	"strings"
+
+	"github.com/nonchan7720/renovate-self-hosted/internal/config"
+	"github.com/nonchan7720/renovate-self-hosted/internal/dispatch"
+)
+
+// MaxBodyBytes caps the size of an accepted webhook delivery. GitHub rejects
+// payloads above 25 MB, and Renovate's deliveries are far smaller.
+const MaxBodyBytes = 5 << 20
+
+// Enqueuer accepts jobs produced from webhook events.
+type Enqueuer interface {
+	Enqueue(job dispatch.Job)
+}
+
+// EnqueuerFunc adapts a function to the Enqueuer interface.
+type EnqueuerFunc func(job dispatch.Job)
+
+// Enqueue implements Enqueuer.
+func (f EnqueuerFunc) Enqueue(job dispatch.Job) { f(job) }
+
+// Handler validates GitHub webhook deliveries and enqueues Renovate runs.
+type Handler struct {
+	secret  string
+	trigger config.Trigger
+	queue   Enqueuer
+	logger  *slog.Logger
+}
+
+// NewHandler builds a Handler. A nil logger falls back to slog.Default.
+func NewHandler(secret string, trigger config.Trigger, queue Enqueuer, logger *slog.Logger) *Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Handler{secret: secret, trigger: trigger, queue: queue, logger: logger}
+}
+
+// result is the JSON body returned for an accepted delivery.
+type result struct {
+	Status     string   `json:"status"`
+	Reason     string   `json:"reason,omitempty"`
+	Repository string   `json:"repository,omitempty"`
+	Details    []string `json:"details,omitempty"`
+}
+
+const (
+	statusQueued  = "queued"
+	statusIgnored = "ignored"
+)
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		httpError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
+
+	event := r.Header.Get(EventHeader)
+	delivery := r.Header.Get(DeliveryHeader)
+	logger := h.logger.With(slog.String("event", event), slog.String("delivery", delivery))
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
+	if err != nil {
+		logger.Warn("failed to read request body", slog.Any("error", err))
+		httpError(w, http.StatusBadRequest, "unreadable request body")
+		return
+	}
+
+	if err := VerifySignature(h.secret, r.Header.Get(SignatureHeader), body); err != nil {
+		logger.Warn("rejected delivery", slog.Any("error", err))
+		status := http.StatusUnauthorized
+		if errors.Is(err, ErrMissingSignature) {
+			status = http.StatusBadRequest
+		}
+		httpError(w, status, err.Error())
+		return
+	}
+
+	res, err := h.route(event, delivery, body, logger)
+	if err != nil {
+		logger.Warn("failed to handle delivery", slog.Any("error", err))
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (h *Handler) route(event, delivery string, body []byte, logger *slog.Logger) (result, error) {
+	switch event {
+	case "ping":
+		return result{Status: statusIgnored, Reason: "ping"}, nil
+	case "issues":
+		return h.handleIssues(delivery, body, logger)
+	case "pull_request":
+		return h.handlePullRequest(delivery, body, logger)
+	case "push":
+		return h.handlePush(delivery, body, logger)
+	case "":
+		return result{}, errors.New("missing " + EventHeader + " header")
+	default:
+		return result{Status: statusIgnored, Reason: "unsupported event " + event}, nil
+	}
+}
+
+// handleIssues reacts to a checkbox being ticked on Renovate's Dependency
+// Dashboard issue.
+func (h *Handler) handleIssues(delivery string, body []byte, logger *slog.Logger) (result, error) {
+	var ev IssuesEvent
+	if err := json.Unmarshal(body, &ev); err != nil {
+		return result{}, fmt.Errorf("decode issues payload: %w", err)
+	}
+	if ev.Action != "edited" {
+		return result{Status: statusIgnored, Reason: "issue action " + ev.Action}, nil
+	}
+	if !h.trigger.IsBot(ev.Issue.User.Login) {
+		return result{Status: statusIgnored, Reason: "issue is not owned by Renovate"}, nil
+	}
+	if res, ok := h.checkEditable(ev.Repository, ev.Sender, ev.Changes); !ok {
+		return res, nil
+	}
+
+	checked := NewlyChecked(ev.Changes.Body.From, ev.Issue.Body)
+	if len(checked) == 0 {
+		return result{Status: statusIgnored, Reason: "no checkbox was ticked"}, nil
+	}
+
+	labels := Labels(checked)
+	logger.Info("dependency dashboard checkbox ticked",
+		slog.String("repository", ev.Repository.FullName),
+		slog.Int("issue", ev.Issue.Number),
+		slog.String("sender", ev.Sender.Login),
+		slog.Any("checked", labels))
+
+	h.queue.Enqueue(dispatch.Job{
+		Repository: ev.Repository.FullName,
+		Reasons:    []string{dispatch.ReasonDashboardCheckbox},
+		Details:    labels,
+		Deliveries: deliveries(delivery),
+		URL:        ev.Issue.HTMLURL,
+	})
+	return result{
+		Status:     statusQueued,
+		Reason:     dispatch.ReasonDashboardCheckbox,
+		Repository: ev.Repository.FullName,
+		Details:    labels,
+	}, nil
+}
+
+// handlePullRequest reacts to a checkbox being ticked in the body of a Renovate
+// pull request, such as the rebase/retry box.
+func (h *Handler) handlePullRequest(delivery string, body []byte, logger *slog.Logger) (result, error) {
+	var ev PullRequestEvent
+	if err := json.Unmarshal(body, &ev); err != nil {
+		return result{}, fmt.Errorf("decode pull_request payload: %w", err)
+	}
+	if ev.Action != "edited" {
+		return result{Status: statusIgnored, Reason: "pull request action " + ev.Action}, nil
+	}
+	if !h.trigger.IsBot(ev.PullRequest.User.Login) {
+		return result{Status: statusIgnored, Reason: "pull request is not owned by Renovate"}, nil
+	}
+	if ev.PullRequest.State != "" && ev.PullRequest.State != "open" {
+		return result{Status: statusIgnored, Reason: "pull request is " + ev.PullRequest.State}, nil
+	}
+	if res, ok := h.checkEditable(ev.Repository, ev.Sender, ev.Changes); !ok {
+		return res, nil
+	}
+
+	checked := NewlyChecked(ev.Changes.Body.From, ev.PullRequest.Body)
+	if len(checked) == 0 {
+		return result{Status: statusIgnored, Reason: "no checkbox was ticked"}, nil
+	}
+
+	labels := Labels(checked)
+	logger.Info("pull request checkbox ticked",
+		slog.String("repository", ev.Repository.FullName),
+		slog.Int("pull_request", ev.PullRequest.Number),
+		slog.String("sender", ev.Sender.Login),
+		slog.Any("checked", labels))
+
+	h.queue.Enqueue(dispatch.Job{
+		Repository: ev.Repository.FullName,
+		Reasons:    []string{dispatch.ReasonPullRequestCheckbox},
+		Details:    labels,
+		Deliveries: deliveries(delivery),
+		URL:        ev.PullRequest.HTMLURL,
+	})
+	return result{
+		Status:     statusQueued,
+		Reason:     dispatch.ReasonPullRequestCheckbox,
+		Repository: ev.Repository.FullName,
+		Details:    labels,
+	}, nil
+}
+
+// handlePush reacts to Renovate configuration changing on the default branch.
+func (h *Handler) handlePush(delivery string, body []byte, logger *slog.Logger) (result, error) {
+	if !h.trigger.OnPush {
+		return result{Status: statusIgnored, Reason: "push triggers are disabled"}, nil
+	}
+
+	var ev PushEvent
+	if err := json.Unmarshal(body, &ev); err != nil {
+		return result{}, fmt.Errorf("decode push payload: %w", err)
+	}
+	if ev.Deleted {
+		return result{Status: statusIgnored, Reason: "branch deletion"}, nil
+	}
+	if branch, ok := strings.CutPrefix(ev.Ref, "refs/heads/"); !ok || branch != ev.Repository.DefaultBranch {
+		return result{Status: statusIgnored, Reason: "push is not on the default branch"}, nil
+	}
+	if !h.trigger.RepositoryAllowed(ev.Repository.FullName) {
+		return result{Status: statusIgnored, Reason: "repository is not allowed"}, nil
+	}
+
+	var touched []string
+	for _, commit := range ev.Commits {
+		for _, path := range commit.Paths() {
+			if h.trigger.MatchesPushPath(path) && !slices.Contains(touched, path) {
+				touched = append(touched, path)
+			}
+		}
+	}
+	if len(touched) == 0 {
+		return result{Status: statusIgnored, Reason: "no Renovate configuration file changed"}, nil
+	}
+
+	logger.Info("renovate configuration changed",
+		slog.String("repository", ev.Repository.FullName),
+		slog.Any("paths", touched))
+
+	h.queue.Enqueue(dispatch.Job{
+		Repository: ev.Repository.FullName,
+		Reasons:    []string{dispatch.ReasonConfigPush},
+		Details:    touched,
+		Deliveries: deliveries(delivery),
+	})
+	return result{
+		Status:     statusQueued,
+		Reason:     dispatch.ReasonConfigPush,
+		Repository: ev.Repository.FullName,
+		Details:    touched,
+	}, nil
+}
+
+// checkEditable applies the guards shared by the issue and pull request edit
+// handlers. It reports false together with the response to send when the
+// delivery must not produce a run.
+func (h *Handler) checkEditable(repo Repository, sender User, changes Changes) (result, bool) {
+	// Renovate rewrites these bodies itself whenever it finishes a run, which
+	// would otherwise bounce straight back to us as another run request.
+	if h.trigger.IsBot(sender.Login) {
+		return result{Status: statusIgnored, Reason: "edit was made by Renovate itself"}, false
+	}
+	if !h.trigger.RepositoryAllowed(repo.FullName) {
+		return result{Status: statusIgnored, Reason: "repository is not allowed"}, false
+	}
+	if changes.Body == nil {
+		return result{Status: statusIgnored, Reason: "body was not edited"}, false
+	}
+	return result{}, true
+}
+
+func deliveries(id string) []string {
+	if id == "" {
+		return nil
+	}
+	return []string{id}
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		slog.Debug("failed to write response", slog.Any("error", err))
+	}
+}
+
+func httpError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
