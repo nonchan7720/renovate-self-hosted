@@ -123,46 +123,17 @@ func (h *Handler) handleIssues(delivery string, body []byte, logger *slog.Logger
 	if err := json.Unmarshal(body, &ev); err != nil {
 		return result{}, fmt.Errorf("decode issues payload: %w", err)
 	}
-	if ev.Action != "edited" {
-		return result{Status: statusIgnored, Reason: "issue action " + ev.Action}, nil
-	}
-	if !h.trigger.IsBot(ev.Issue.User.Login) {
-		return result{Status: statusIgnored, Reason: "issue is not owned by Renovate"}, nil
-	}
-	// Closing the Dependency Dashboard is how a repository opts out, so an
-	// edit to a closed one is not a request to run.
-	if ev.Issue.State != "" && ev.Issue.State != "open" {
-		return result{Status: statusIgnored, Reason: "issue is " + ev.Issue.State}, nil
-	}
-	if res, ok := h.checkEditable(ev.Repository, ev.Sender, ev.Changes); !ok {
-		return res, nil
-	}
-
-	checked := NewlyChecked(ev.Changes.Body.From, ev.Issue.Body)
-	if len(checked) == 0 {
-		return result{Status: statusIgnored, Reason: "no checkbox was ticked"}, nil
-	}
-
-	labels := Labels(checked)
-	logger.Info("dependency dashboard checkbox ticked",
-		slog.String("repository", ev.Repository.FullName),
-		slog.Int("issue", ev.Issue.Number),
-		slog.String("sender", ev.Sender.Login),
-		slog.Any("checked", labels))
-
-	h.queue.Enqueue(dispatch.Job{
-		Repository: ev.Repository.FullName,
-		Reasons:    []string{dispatch.ReasonDashboardCheckbox},
-		Details:    labels,
-		Deliveries: deliveries(delivery),
-		URL:        ev.Issue.HTMLURL,
-	})
-	return result{
-		Status:     statusQueued,
-		Reason:     dispatch.ReasonDashboardCheckbox,
-		Repository: ev.Repository.FullName,
-		Details:    labels,
-	}, nil
+	return h.handleCheckboxEdit(delivery, ev.Action, ev.Repository, ev.Sender, ev.Changes, checkboxEdit{
+		subject:   "issue",
+		number:    ev.Issue.Number,
+		body:      ev.Issue.Body,
+		state:     ev.Issue.State,
+		author:    ev.Issue.User,
+		htmlURL:   ev.Issue.HTMLURL,
+		reason:    dispatch.ReasonDashboardCheckbox,
+		logMsg:    "dependency dashboard checkbox ticked",
+		numberKey: "issue",
+	}, logger)
 }
 
 // handlePullRequest reacts to a checkbox being ticked in the body of a Renovate
@@ -172,42 +143,75 @@ func (h *Handler) handlePullRequest(delivery string, body []byte, logger *slog.L
 	if err := json.Unmarshal(body, &ev); err != nil {
 		return result{}, fmt.Errorf("decode pull_request payload: %w", err)
 	}
-	if ev.Action != "edited" {
-		return result{Status: statusIgnored, Reason: "pull request action " + ev.Action}, nil
+	return h.handleCheckboxEdit(delivery, ev.Action, ev.Repository, ev.Sender, ev.Changes, checkboxEdit{
+		subject:   "pull request",
+		number:    ev.PullRequest.Number,
+		body:      ev.PullRequest.Body,
+		state:     ev.PullRequest.State,
+		author:    ev.PullRequest.User,
+		htmlURL:   ev.PullRequest.HTMLURL,
+		reason:    dispatch.ReasonPullRequestCheckbox,
+		logMsg:    "pull request checkbox ticked",
+		numberKey: "pull_request",
+	}, logger)
+}
+
+// checkboxEdit is the part of an edited issue or pull request the checkbox
+// rules act on, plus the bits that differ between the two handlers.
+type checkboxEdit struct {
+	subject   string // "issue" or "pull request", used in the ignore reasons
+	number    int
+	body      string
+	state     string
+	author    User
+	htmlURL   string
+	reason    string // one of the dispatch.Reason* constants
+	logMsg    string
+	numberKey string // slog key: "issue" or "pull_request"
+}
+
+// handleCheckboxEdit is the pipeline shared by handleIssues and
+// handlePullRequest: action=="edited" -> author must be a configured Renovate
+// bot -> state must be open -> checkEditable -> NewlyChecked -> enqueue a run.
+func (h *Handler) handleCheckboxEdit(delivery, action string, repo Repository, sender User, changes Changes, edit checkboxEdit, logger *slog.Logger) (result, error) {
+	if action != "edited" {
+		return result{Status: statusIgnored, Reason: edit.subject + " action " + action}, nil
 	}
-	if !h.trigger.IsBot(ev.PullRequest.User.Login) {
-		return result{Status: statusIgnored, Reason: "pull request is not owned by Renovate"}, nil
+	if !h.trigger.IsBot(edit.author.Login) {
+		return result{Status: statusIgnored, Reason: edit.subject + " is not owned by Renovate"}, nil
 	}
-	if ev.PullRequest.State != "" && ev.PullRequest.State != "open" {
-		return result{Status: statusIgnored, Reason: "pull request is " + ev.PullRequest.State}, nil
+	// Closing the issue or pull request is how a repository opts out, so an
+	// edit to a closed one is not a request to run.
+	if edit.state != "" && edit.state != "open" {
+		return result{Status: statusIgnored, Reason: edit.subject + " is " + edit.state}, nil
 	}
-	if res, ok := h.checkEditable(ev.Repository, ev.Sender, ev.Changes); !ok {
+	if res, ok := h.checkEditable(repo, sender, changes); !ok {
 		return res, nil
 	}
 
-	checked := NewlyChecked(ev.Changes.Body.From, ev.PullRequest.Body)
+	checked := NewlyChecked(changes.Body.From, edit.body)
 	if len(checked) == 0 {
 		return result{Status: statusIgnored, Reason: "no checkbox was ticked"}, nil
 	}
 
 	labels := Labels(checked)
-	logger.Info("pull request checkbox ticked",
-		slog.String("repository", ev.Repository.FullName),
-		slog.Int("pull_request", ev.PullRequest.Number),
-		slog.String("sender", ev.Sender.Login),
+	logger.Info(edit.logMsg,
+		slog.String("repository", repo.FullName),
+		slog.Int(edit.numberKey, edit.number),
+		slog.String("sender", sender.Login),
 		slog.Any("checked", labels))
 
 	h.queue.Enqueue(dispatch.Job{
-		Repository: ev.Repository.FullName,
-		Reasons:    []string{dispatch.ReasonPullRequestCheckbox},
+		Repository: repo.FullName,
+		Reasons:    []string{edit.reason},
 		Details:    labels,
 		Deliveries: deliveries(delivery),
-		URL:        ev.PullRequest.HTMLURL,
+		URL:        edit.htmlURL,
 	})
 	return result{
 		Status:     statusQueued,
-		Reason:     dispatch.ReasonPullRequestCheckbox,
-		Repository: ev.Repository.FullName,
+		Reason:     edit.reason,
+		Repository: repo.FullName,
 		Details:    labels,
 	}, nil
 }
