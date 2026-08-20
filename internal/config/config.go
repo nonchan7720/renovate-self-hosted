@@ -172,7 +172,7 @@ func Load() (Config, error) {
 	}
 	if cfg.Runner.Repository == "" {
 		collect(errors.New("RUNNER_REPOSITORY is required"))
-	} else if strings.Count(cfg.Runner.Repository, "/") != 1 {
+	} else if owner, repo, ok := strings.Cut(cfg.Runner.Repository, "/"); !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
 		collect(fmt.Errorf("RUNNER_REPOSITORY must be in owner/repo form, got %q", cfg.Runner.Repository))
 	}
 	if cfg.GitHubToken == "" && !cfg.DryRun {

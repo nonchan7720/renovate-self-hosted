@@ -130,6 +130,22 @@ func TestLoadValidation(t *testing.T) {
 			env:    map[string]string{"RUNNER_REPOSITORY": "renovate-runner"},
 			wantIn: []string{"owner/repo"},
 		},
+		"runner repository missing repo": {
+			env:    map[string]string{"RUNNER_REPOSITORY": "acme/"},
+			wantIn: []string{"owner/repo"},
+		},
+		"runner repository missing owner": {
+			env:    map[string]string{"RUNNER_REPOSITORY": "/renovate-runner"},
+			wantIn: []string{"owner/repo"},
+		},
+		"runner repository extra segment": {
+			env:    map[string]string{"RUNNER_REPOSITORY": "acme/renovate-runner/extra"},
+			wantIn: []string{"owner/repo"},
+		},
+		"runner repository empty middle segment": {
+			env:    map[string]string{"RUNNER_REPOSITORY": "acme//renovate-runner"},
+			wantIn: []string{"owner/repo"},
+		},
 		"missing token without dry run": {
 			env:    map[string]string{"GITHUB_TOKEN": ""},
 			wantIn: []string{"GITHUB_TOKEN"},
