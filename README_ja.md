@@ -72,7 +72,7 @@ push のペイロードに含まれるコミットは最大20件で、GitHub が
 | `RUNNER_REPOSITORY_INPUT` | `repositories` | 対象の `owner/repo` を受け取るワークフロー入力の名前。 |
 | `RUNNER_EXTRA_INPUTS` | — | 追加の入力を `key=value,key=value` 形式で。`=` を含まない断片は直前の値の続きとして扱われるため、値自体にカンマを含められます（`labels=area/foo,area/bar`）。ワークフローが宣言していない入力を送ると GitHub は dispatch 全体を拒否します。 |
 | `RENOVATE_BOT_LOGINS` | `renovate[bot],renovate-bot` | issue や PR の作成者として Renovate とみなすアカウント。 |
-| `ALLOWED_REPOSITORIES` | — | 任意の許可リスト。`owner/repo` または `owner/*`。空ならすべて許可。 |
+| `ALLOWED_REPOSITORIES` | — | 任意の許可リスト。`owner/repo` または `owner/*`。未設定ならすべて許可。設定されているのに有効な項目が1つも無い場合は、黙って「全許可」に倒れず起動エラーになります。 |
 | `TRIGGER_ON_PUSH` | `true` | 設定ファイルの push で実行するかどうか。 |
 | `PUSH_CONFIG_PATHS` | `renovate.json`, `renovate.json5`, `.renovaterc*`, `.github/renovate.json*`, `.gitlab/renovate.json` | Renovate の設定ファイルとして扱うパス。 |
 | `DEBOUNCE_WINDOW` | `10s` | リポジトリの実行を dispatch するまでの待機時間。 |
@@ -114,8 +114,17 @@ helm install renovate-webhook deploy/helm/renovate-webhook \
 必須の値が欠けている場合、チャートは CrashLoopBackOff になる代わりにインストール自体を
 失敗させます。
 
-イメージはクラスタが pull できる場所に置く必要があります。公開先に合わせて
-`image.repository` と `image.tag` を設定してください。
+リリース時にマルチアーキテクチャのイメージが
+`ghcr.io/nonchan7720/renovate-self-hosted` に、チャート自体が
+`oci://ghcr.io/nonchan7720/charts` に publish されるので、チェックアウトなしで
+バージョン指定してインストールできます。
+
+```sh
+helm install renovate-webhook oci://ghcr.io/nonchan7720/charts/renovate-webhook \
+  --version 0.1.0 \
+  --set config.runnerRepository=acme/renovate-runner \
+  --set secret.existingSecret=renovate-webhook
+```
 
 Docker で動かす場合:
 
@@ -160,6 +169,11 @@ helm lint deploy/helm/renovate-webhook \
   --set config.runnerRepository=acme/renovate-runner \
   --set secret.webhookSecret=example --set secret.githubToken=example
 ```
+
+リリースは [release-please](https://github.com/googleapis/release-please) が管理します。
+`main` へのマージでコミットメッセージからリリース PR が維持され、その PR をマージすると
+バージョンがタグ付けされ、イメージとチャートが publish されます。チャートの `version` と
+`appVersion` もタグに追従します。
 
 サードパーティ依存はありません。すべて標準ライブラリです。
 

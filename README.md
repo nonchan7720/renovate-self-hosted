@@ -72,7 +72,7 @@ All configuration comes from the environment.
 | `RUNNER_REPOSITORY_INPUT` | `repositories` | Workflow input that receives the target `owner/repo`. |
 | `RUNNER_EXTRA_INPUTS` | — | Extra inputs as `key=value,key=value`. A fragment without an `=` continues the previous value, so a value may contain commas (`labels=area/foo,area/bar`). Only inputs the workflow declares may be sent; GitHub rejects the whole dispatch otherwise. |
 | `RENOVATE_BOT_LOGINS` | `renovate[bot],renovate-bot` | Accounts whose issues and pull requests count as Renovate's. |
-| `ALLOWED_REPOSITORIES` | — | Optional allow list, `owner/repo` or `owner/*`. Empty allows every repository. |
+| `ALLOWED_REPOSITORIES` | — | Optional allow list, `owner/repo` or `owner/*`. Unset allows every repository; set but containing no usable entry is a startup error rather than a silent "allow everything". |
 | `TRIGGER_ON_PUSH` | `true` | Whether config pushes trigger a run. |
 | `PUSH_CONFIG_PATHS` | `renovate.json`, `renovate.json5`, `.renovaterc*`, `.github/renovate.json*`, `.gitlab/renovate.json` | Paths treated as Renovate configuration. |
 | `DEBOUNCE_WINDOW` | `10s` | Quiet period before a repository's run is dispatched. |
@@ -112,8 +112,17 @@ logs the decisions without dispatching anything. Everything else is documented
 in [`values.yaml`](deploy/helm/renovate-webhook/values.yaml); the chart refuses
 to install rather than crash-looping when a required value is missing.
 
-The image has to be somewhere the cluster can pull it — set
-`image.repository` and `image.tag` to wherever you publish it.
+Releases publish a multi-architecture image to
+`ghcr.io/nonchan7720/renovate-self-hosted` and the chart itself to
+`oci://ghcr.io/nonchan7720/charts`, so a tagged version can be installed
+without a checkout:
+
+```sh
+helm install renovate-webhook oci://ghcr.io/nonchan7720/charts/renovate-webhook \
+  --version 0.1.0 \
+  --set config.runnerRepository=acme/renovate-runner \
+  --set secret.existingSecret=renovate-webhook
+```
 
 Or plain Docker:
 
@@ -158,6 +167,11 @@ helm lint deploy/helm/renovate-webhook \
   --set config.runnerRepository=acme/renovate-runner \
   --set secret.webhookSecret=example --set secret.githubToken=example
 ```
+
+Releases are managed by [release-please](https://github.com/googleapis/release-please):
+merging to `main` maintains a release pull request from the commit messages, and
+merging that tags the version, which in turn publishes the image and the chart.
+The chart's `version` and `appVersion` are kept in step with the tag.
 
 The service has no third-party dependencies; everything is standard library.
 
