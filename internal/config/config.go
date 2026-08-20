@@ -129,17 +129,16 @@ func Load() (Config, error) {
 		Path:          envOr("RENOVATE_WEBHOOK_PATH", DefaultPath),
 		WebhookSecret: os.Getenv("RENOVATE_WEBHOOK_SECRET"),
 		GitHubAPIURL:  strings.TrimSuffix(envOr("GITHUB_API_URL", DefaultGitHubAPIURL), "/"),
-		GitHubToken:   os.Getenv("GITHUB_TOKEN"),
+		GitHubToken:   strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
 		Runner: Runner{
-			Repository:      os.Getenv("RUNNER_REPOSITORY"),
+			Repository:      strings.TrimSpace(os.Getenv("RUNNER_REPOSITORY")),
 			Workflow:        envOr("RUNNER_WORKFLOW", DefaultWorkflow),
 			Ref:             envOr("RUNNER_REF", DefaultRef),
 			RepositoryInput: envOr("RUNNER_REPOSITORY_INPUT", DefaultRepositoryInput),
 		},
 		Trigger: Trigger{
-			BotLogins:           envList("RENOVATE_BOT_LOGINS", DefaultBotLogins),
-			AllowedRepositories: envList("ALLOWED_REPOSITORIES", nil),
-			PushPaths:           envList("PUSH_CONFIG_PATHS", DefaultPushPaths),
+			BotLogins: envList("RENOVATE_BOT_LOGINS", DefaultBotLogins),
+			PushPaths: envList("PUSH_CONFIG_PATHS", DefaultPushPaths),
 		},
 	}
 
@@ -165,6 +164,8 @@ func Load() (Config, error) {
 	cfg.Debounce.MaxWait, err = envDuration("DEBOUNCE_MAX_WAIT", DefaultDebounceMaxWait)
 	collect(err)
 	cfg.Runner.ExtraInputs, err = envKeyValues("RUNNER_EXTRA_INPUTS")
+	collect(err)
+	cfg.Trigger.AllowedRepositories, err = envAllowedRepositories("ALLOWED_REPOSITORIES")
 	collect(err)
 
 	if cfg.WebhookSecret == "" {
@@ -211,6 +212,24 @@ func envList(key string, fallback []string) []string {
 		return fallback
 	}
 	return out
+}
+
+// envAllowedRepositories parses ALLOWED_REPOSITORIES like envList, but an
+// unset or empty variable is the only way to get the "no restriction"
+// fallback. A variable that is set yet parses to no usable entries (e.g. ","
+// or " , ") would otherwise fall back to that same nil list, silently turning
+// an intended access restriction into "allow everything" — so that case is a
+// configuration error instead.
+func envAllowedRepositories(key string) ([]string, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil, nil
+	}
+	list := envList(key, nil)
+	if len(list) == 0 {
+		return nil, fmt.Errorf("%s: %q does not contain any usable repository entries", key, raw)
+	}
+	return list, nil
 }
 
 // envKeyValues parses "key=value,key=value". A fragment with no "=" continues

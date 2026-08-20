@@ -178,6 +178,14 @@ func TestLoadValidation(t *testing.T) {
 			env:    map[string]string{"RENOVATE_WEBHOOK_SECRET": "", "RUNNER_REPOSITORY": ""},
 			wantIn: []string{"RENOVATE_WEBHOOK_SECRET", "RUNNER_REPOSITORY"},
 		},
+		"allowed repositories only commas": {
+			env:    map[string]string{"ALLOWED_REPOSITORIES": ","},
+			wantIn: []string{"ALLOWED_REPOSITORIES"},
+		},
+		"allowed repositories only commas and spaces": {
+			env:    map[string]string{"ALLOWED_REPOSITORIES": " , "},
+			wantIn: []string{"ALLOWED_REPOSITORIES"},
+		},
 	}
 
 	for name, tc := range tests {
@@ -236,6 +244,48 @@ func TestLoadExtraInputsWithCommas(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLoadTrimsTokenAndRepository covers a token or repository name that
+// arrives with surrounding whitespace, routine when a secret is populated
+// from a file or an editor. Left untrimmed, the token breaks every dispatch's
+// Authorization header and the repository builds a malformed URL, both with
+// an error that says nothing about whitespace being the cause.
+func TestLoadTrimsTokenAndRepository(t *testing.T) {
+	setEnv(t, map[string]string{
+		"GITHUB_TOKEN":      "\ttoken-value\n",
+		"RUNNER_REPOSITORY": "  acme/renovate-runner\n",
+	})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if cfg.GitHubToken != "token-value" {
+		t.Errorf("GitHubToken = %q, want it trimmed", cfg.GitHubToken)
+	}
+	if cfg.Runner.Repository != "acme/renovate-runner" {
+		t.Errorf("Runner.Repository = %q, want it trimmed", cfg.Runner.Repository)
+	}
+}
+
+// TestLoadUnsetAllowedRepositoriesPermitsEverything pins down the documented
+// default: leaving ALLOWED_REPOSITORIES unset (or empty) must keep meaning
+// "no restriction", the one case envAllowedRepositories does not turn into a
+// configuration error.
+func TestLoadUnsetAllowedRepositoriesPermitsEverything(t *testing.T) {
+	setEnv(t, map[string]string{"ALLOWED_REPOSITORIES": ""})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if len(cfg.Trigger.AllowedRepositories) != 0 {
+		t.Errorf("AllowedRepositories = %v, want empty", cfg.Trigger.AllowedRepositories)
+	}
+	if !cfg.Trigger.RepositoryAllowed("anything/at-all") {
+		t.Error("an unset ALLOWED_REPOSITORIES should permit every repository")
 	}
 }
 
