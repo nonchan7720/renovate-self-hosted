@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,7 +68,7 @@ func (a *Actions) Dispatch(ctx context.Context, job Job) error {
 	delay := initialDelay
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		retryable, err := a.do(ctx, endpoint, payload)
+		retryable, retryAfter, err := a.do(ctx, endpoint, payload)
 		if err == nil {
 			return nil
 		}
@@ -75,12 +76,19 @@ func (a *Actions) Dispatch(ctx context.Context, job Job) error {
 		if !retryable || attempt == maxAttempts {
 			break
 		}
+		// GitHub's advice trumps our guess: a secondary rate limit clears on
+		// its own schedule, and backing off less than that just spends the
+		// attempt budget on requests that are certain to be rejected again.
+		wait := delay
+		if retryAfter > wait {
+			wait = retryAfter
+		}
 		a.logger.Warn("retrying workflow dispatch",
 			slog.String("repository", job.Repository),
 			slog.Int("attempt", attempt),
-			slog.Duration("in", delay),
+			slog.Duration("in", wait),
 			slog.Any("error", err))
-		if err := a.sleep(ctx, delay); err != nil {
+		if err := a.sleep(ctx, wait); err != nil {
 			return err
 		}
 		delay *= 2
@@ -103,11 +111,11 @@ func (a *Actions) payload(job Job) map[string]any {
 }
 
 // do performs a single attempt and reports whether the failure is worth
-// retrying.
-func (a *Actions) do(ctx context.Context, endpoint string, payload []byte) (retryable bool, err error) {
+// retrying, and how long GitHub asked us to wait before trying again.
+func (a *Actions) do(ctx context.Context, endpoint string, payload []byte) (retryable bool, retryAfter time.Duration, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return false, fmt.Errorf("build request: %w", err)
+		return false, 0, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
@@ -118,7 +126,7 @@ func (a *Actions) do(ctx context.Context, endpoint string, payload []byte) (retr
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return ctx.Err() == nil, fmt.Errorf("call github: %w", err)
+		return ctx.Err() == nil, 0, fmt.Errorf("call github: %w", err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)
@@ -126,25 +134,68 @@ func (a *Actions) do(ctx context.Context, endpoint string, payload []byte) (retr
 	}()
 
 	if res.StatusCode == http.StatusNoContent {
-		return false, nil
+		return false, 0, nil
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
 	message := strings.TrimSpace(string(body))
+	retryAfter = parseRetryAfter(res.Header.Get("Retry-After"))
 	switch res.StatusCode {
 	case http.StatusNotFound:
-		return false, fmt.Errorf("github returned 404: workflow %q on %q not found, "+
+		return false, 0, fmt.Errorf("github returned 404: workflow %q on %q not found, "+
 			"or the token cannot see it: %s", a.runner.Workflow, a.runner.Repository, message)
 	case http.StatusUnprocessableEntity:
-		return false, fmt.Errorf("github returned 422: ref %q or the workflow inputs are invalid: %s",
+		return false, 0, fmt.Errorf("github returned 422: ref %q or the workflow inputs are invalid: %s",
 			a.runner.Ref, message)
+	case http.StatusForbidden:
+		// GitHub reuses 403 for two unrelated things: a token that lacks
+		// permission on this workflow, and a secondary rate limit tripped by
+		// bursty dispatches across many repositories. Only the latter clears
+		// on its own, so retrying the former would just burn attempts on a
+		// request that can never succeed. Treat it as a rate limit only when
+		// GitHub actually signals one, either with Retry-After or with the
+		// wording it uses for abuse detection.
+		if retryAfter > 0 || isSecondaryRateLimit(message) {
+			return true, retryAfter, fmt.Errorf("github returned 403 (secondary rate limit): %s", message)
+		}
+		return false, 0, fmt.Errorf("github returned 403: the token likely cannot dispatch that workflow: %s", message)
 	case http.StatusTooManyRequests:
-		return true, fmt.Errorf("github returned 429: %s", message)
+		return true, retryAfter, fmt.Errorf("github returned 429: %s", message)
 	}
 	if res.StatusCode >= 500 {
-		return true, fmt.Errorf("github returned %d: %s", res.StatusCode, message)
+		return true, retryAfter, fmt.Errorf("github returned %d: %s", res.StatusCode, message)
 	}
-	return false, fmt.Errorf("github returned %d: %s", res.StatusCode, message)
+	return false, 0, fmt.Errorf("github returned %d: %s", res.StatusCode, message)
+}
+
+// isSecondaryRateLimit reports whether message is GitHub's wording for a
+// secondary rate limit or abuse-detection response, the two 403 cases that
+// clear on their own rather than indicating a permissions problem.
+func isSecondaryRateLimit(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "secondary rate limit") || strings.Contains(lower, "abuse detection")
+}
+
+// parseRetryAfter reads GitHub's Retry-After header, sent as an integer
+// number of seconds or, occasionally, an HTTP-date. A missing, empty,
+// unparseable, or negative value means GitHub gave no advice, so callers fall
+// back to their own backoff rather than treating this as an error.
+func parseRetryAfter(raw string) time.Duration {
+	if raw == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if at, err := http.ParseTime(raw); err == nil {
+		if d := time.Until(at); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

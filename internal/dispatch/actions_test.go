@@ -170,6 +170,157 @@ func TestActionsDispatchFailures(t *testing.T) {
 	}
 }
 
+// TestActionsDispatchRetries403WithRetryAfter covers GitHub's secondary rate
+// limit signal: a 403 that carries Retry-After is a burst limit that clears
+// on its own, not a permissions failure, so it must be retried rather than
+// failing the whole burst of dispatches permanently.
+func TestActionsDispatchRetries403WithRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) < maxAttempts {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"rate limited"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	if err := newTestActions(srv, testRunner()).Dispatch(t.Context(), Job{Repository: "acme/api"}); err != nil {
+		t.Fatalf("Dispatch() = %v", err)
+	}
+	if got := calls.Load(); got != maxAttempts {
+		t.Fatalf("made %d calls, want %d", got, maxAttempts)
+	}
+}
+
+// TestActionsDispatchRetries403SecondaryRateLimitBody covers the case where
+// GitHub omits Retry-After but says so in the body instead.
+func TestActionsDispatchRetries403SecondaryRateLimitBody(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) < maxAttempts {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"You have exceeded a secondary rate limit. `+
+				`Please wait a few minutes before you try again."}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	if err := newTestActions(srv, testRunner()).Dispatch(t.Context(), Job{Repository: "acme/api"}); err != nil {
+		t.Fatalf("Dispatch() = %v", err)
+	}
+	if got := calls.Load(); got != maxAttempts {
+		t.Fatalf("made %d calls, want %d", got, maxAttempts)
+	}
+}
+
+// TestActionsDispatchDoesNotRetryPlain403 covers the other half of the 403
+// split: no Retry-After and no rate-limit wording means the token really
+// cannot dispatch that workflow, so retrying would just waste attempts.
+func TestActionsDispatchDoesNotRetryPlain403(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
+	}))
+	defer srv.Close()
+
+	err := newTestActions(srv, testRunner()).Dispatch(t.Context(), Job{Repository: "acme/api"})
+	if err == nil {
+		t.Fatal("Dispatch() = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("error = %v, want it to mention 403", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("made %d calls, want 1", got)
+	}
+}
+
+// TestActionsDispatchHonoursRetryAfterOverBackoff covers a 429 that tells us
+// to wait longer than the exponential backoff would on its own: retrying
+// after the backoff's 1s would just land inside the same limit window and
+// fail again, so GitHub's advice must win.
+func TestActionsDispatchHonoursRetryAfterOverBackoff(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"message":"slow down"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	a := newTestActions(srv, testRunner())
+	var gotDelays []time.Duration
+	a.sleep = func(_ context.Context, d time.Duration) error {
+		gotDelays = append(gotDelays, d)
+		return nil
+	}
+
+	if err := a.Dispatch(t.Context(), Job{Repository: "acme/api"}); err != nil {
+		t.Fatalf("Dispatch() = %v", err)
+	}
+	if len(gotDelays) != 1 {
+		t.Fatalf("sleep called %d times, want 1", len(gotDelays))
+	}
+	if gotDelays[0] != 30*time.Second {
+		t.Errorf("delay = %v, want 30s (Retry-After should beat the %v backoff)", gotDelays[0], initialDelay)
+	}
+}
+
+// TestActionsDispatchIgnoresUnparseableRetryAfter covers a header GitHub
+// theoretically could send in a form we do not understand: it must not error
+// out or wedge the retry loop, just fall back to the normal backoff.
+func TestActionsDispatchIgnoresUnparseableRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "not-a-duration")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"message":"slow down"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	a := newTestActions(srv, testRunner())
+	var gotDelays []time.Duration
+	a.sleep = func(_ context.Context, d time.Duration) error {
+		gotDelays = append(gotDelays, d)
+		return nil
+	}
+
+	if err := a.Dispatch(t.Context(), Job{Repository: "acme/api"}); err != nil {
+		t.Fatalf("Dispatch() = %v", err)
+	}
+	if len(gotDelays) != 1 {
+		t.Fatalf("sleep called %d times, want 1", len(gotDelays))
+	}
+	if gotDelays[0] != initialDelay {
+		t.Errorf("delay = %v, want the normal %v backoff", gotDelays[0], initialDelay)
+	}
+}
+
 func TestActionsDispatchStopsOnCancelledContext(t *testing.T) {
 	t.Parallel()
 
