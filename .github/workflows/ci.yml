@@ -75,8 +75,16 @@ jobs:
             --set replicaCount=2 > /dev/null
 
   docker:
-    name: Build image
-    runs-on: ubuntu-latest
+    name: Build image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
