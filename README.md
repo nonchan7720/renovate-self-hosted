@@ -8,9 +8,15 @@ repository**. This service never runs Renovate: it validates the delivery,
 decides whether it really means "run Renovate against this repository", and
 triggers the runner workflow through the `workflow_dispatch` API.
 
-```
-GitHub  --webhook-->  renovate-webhook  --workflow_dispatch-->  runner repository
-                       (this service)                            (runs Renovate)
+```mermaid
+flowchart LR
+    repos["Managed repositories<br>dashboard, pull requests, config"]
+    svc["renovate-webhook<br>this service"]
+    runner["Runner repository<br>GitHub Actions"]
+
+    repos -- "webhook" --> svc
+    svc -- "workflow_dispatch" --> runner
+    runner -- "runs Renovate" --> repos
 ```
 
 ## What triggers a run
