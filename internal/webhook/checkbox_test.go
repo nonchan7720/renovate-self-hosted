@@ -194,6 +194,20 @@ func TestNewlyCheckedShiftedDuplicateLabels(t *testing.T) {
 			new:  "- [ ] retry\n- [ ] retry\n",
 			want: 0,
 		},
+		// The item count is unchanged here, so positions still mean
+		// something: one box was ticked and another unticked in the same
+		// edit, and the tick is a real request even though the total did
+		// not move.
+		"one ticked while another is unticked": {
+			old:  "- [x] retry\n- [ ] retry\n",
+			new:  "- [ ] retry\n- [x] retry\n",
+			want: 1,
+		},
+		"all ticks moved down by one": {
+			old:  "- [x] retry\n- [x] retry\n- [ ] retry\n",
+			new:  "- [ ] retry\n- [x] retry\n- [x] retry\n",
+			want: 1,
+		},
 	}
 
 	for name, tc := range tests {

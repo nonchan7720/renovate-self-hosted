@@ -69,10 +69,12 @@ func ParseTaskList(body string) []TaskItem {
 // Items are matched by key, and by position among the items sharing that key.
 // Renovate marks each of its controls with a distinct HTML comment, so its
 // keys are unique and the position never matters. Keys can repeat only on the
-// label fallback, where positions shift as items are added or removed and a
-// positional match alone would report an item that was already ticked under a
-// different index. Requiring the number of ticked items under a key to have
-// grown keeps those out.
+// label fallback, and there positions are only meaningful while the items
+// under that key stay put: adding or removing one shifts the rest, so an item
+// that was already ticked can land on an index that used to hold an unticked
+// one and read as a fresh tick. When a key gains or loses items, the tick
+// count therefore decides instead; when it does not, positions are trustworthy
+// and a tick swapped from one item to another is still a tick.
 func NewlyChecked(oldBody, newBody string) []TaskItem {
 	before := make(map[string][]bool)
 	tickedBefore := make(map[string]int)
@@ -85,7 +87,9 @@ func NewlyChecked(oldBody, newBody string) []TaskItem {
 
 	after := ParseTaskList(newBody)
 	tickedAfter := make(map[string]int)
+	totalAfter := make(map[string]int)
 	for _, item := range after {
+		totalAfter[item.Key]++
 		if item.Checked {
 			tickedAfter[item.Key]++
 		}
@@ -102,7 +106,7 @@ func NewlyChecked(oldBody, newBody string) []TaskItem {
 		if prev := before[item.Key]; occurrence < len(prev) && prev[occurrence] {
 			continue
 		}
-		if tickedAfter[item.Key] <= tickedBefore[item.Key] {
+		if len(before[item.Key]) != totalAfter[item.Key] && tickedAfter[item.Key] <= tickedBefore[item.Key] {
 			continue
 		}
 		checked = append(checked, item)
