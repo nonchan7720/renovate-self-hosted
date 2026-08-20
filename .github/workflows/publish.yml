@@ -129,7 +129,14 @@ jobs:
           digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r '.digest')"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      # Build provenance attestations are unavailable for user-owned private
+      # repositories, so this step is skipped while the repository is
+      # private rather than failing a publish that otherwise succeeded.
+      # github.event.repository is absent on workflow_dispatch runs, so the
+      # existence check comes first: dereferencing .private on a missing
+      # repository object must not make the guard truthy and run the step.
+      - if: ${{ github.event.repository && !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.inspect.outputs.digest }}
