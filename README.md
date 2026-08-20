@@ -1,5 +1,7 @@
 # renovate-self-hosted
 
+*English | [日本語](README_ja.md)*
+
 A small Go service that receives GitHub webhooks and starts self-hosted
 [Renovate](https://docs.renovatebot.com/) runs on demand.
 
