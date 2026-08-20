@@ -213,21 +213,32 @@ func envList(key string, fallback []string) []string {
 	return out
 }
 
+// envKeyValues parses "key=value,key=value". A fragment with no "=" continues
+// the previous value, so a value may contain commas itself
+// ("labels=area/foo,area/bar"). Without that, a perfectly reasonable workflow
+// input would stop the whole service from starting.
 func envKeyValues(key string) (map[string]string, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
 		return nil, nil
 	}
+
 	out := make(map[string]string)
+	previous := ""
 	for _, part := range strings.Split(raw, ",") {
 		if part = strings.TrimSpace(part); part == "" {
 			continue
 		}
 		k, v, ok := strings.Cut(part, "=")
-		if !ok || strings.TrimSpace(k) == "" {
-			return nil, fmt.Errorf("%s: %q is not in key=value form", key, part)
+		if k = strings.TrimSpace(k); !ok || k == "" {
+			if previous == "" {
+				return nil, fmt.Errorf("%s: %q is not in key=value form", key, part)
+			}
+			out[previous] += "," + part
+			continue
 		}
-		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		previous = k
+		out[k] = strings.TrimSpace(v)
 	}
 	return out, nil
 }

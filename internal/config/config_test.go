@@ -181,6 +181,48 @@ func TestLoadValidation(t *testing.T) {
 	}
 }
 
+// TestLoadExtraInputsWithCommas covers values that contain commas themselves.
+// Splitting them into fragments used to fail the whole load, so one awkward
+// workflow input stopped the service from starting at all.
+func TestLoadExtraInputsWithCommas(t *testing.T) {
+	tests := map[string]struct {
+		raw  string
+		want map[string]string
+	}{
+		"plain": {
+			raw:  "logLevel=debug,dryRun=full",
+			want: map[string]string{"logLevel": "debug", "dryRun": "full"},
+		},
+		"comma inside a value": {
+			raw:  "labels=area/foo,area/bar",
+			want: map[string]string{"labels": "area/foo,area/bar"},
+		},
+		"comma inside a value followed by another pair": {
+			raw:  "labels=area/foo,area/bar,logLevel=debug",
+			want: map[string]string{"labels": "area/foo,area/bar", "logLevel": "debug"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			setEnv(t, map[string]string{"RUNNER_EXTRA_INPUTS": tc.raw})
+
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load() = %v", err)
+			}
+			if len(cfg.Runner.ExtraInputs) != len(tc.want) {
+				t.Fatalf("ExtraInputs = %v, want %v", cfg.Runner.ExtraInputs, tc.want)
+			}
+			for k, want := range tc.want {
+				if got := cfg.Runner.ExtraInputs[k]; got != want {
+					t.Errorf("ExtraInputs[%q] = %q, want %q", k, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadDryRunMakesTokenOptional(t *testing.T) {
 	setEnv(t, map[string]string{"GITHUB_TOKEN": "", "DRY_RUN": "true"})
 
