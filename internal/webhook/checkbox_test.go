@@ -157,6 +157,71 @@ func TestNewlyCheckedRepeatedLabels(t *testing.T) {
 	}
 }
 
+// TestNewlyCheckedShiftedDuplicateLabels covers the label fallback, where two
+// items can share a key. Removing an item shifts the rest up, so the item that
+// lands at a given index is not the one that was there before; without the
+// tick count guard that shift reads as a fresh tick and fires a run nobody
+// asked for.
+func TestNewlyCheckedShiftedDuplicateLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		old, new string
+		want     int
+	}{
+		"already ticked item shifts up": {
+			old:  "- [ ] retry\n- [x] retry\n",
+			new:  "- [x] retry\n",
+			want: 0,
+		},
+		"already ticked item shifts down": {
+			old:  "- [x] retry\n",
+			new:  "- [ ] retry\n- [x] retry\n",
+			want: 0,
+		},
+		"genuinely ticked among duplicates": {
+			old:  "- [ ] retry\n- [ ] retry\n",
+			new:  "- [x] retry\n- [ ] retry\n",
+			want: 1,
+		},
+		"second of two ticked": {
+			old:  "- [x] retry\n- [ ] retry\n",
+			new:  "- [x] retry\n- [x] retry\n",
+			want: 1,
+		},
+		"unrelated item removed": {
+			old:  "- [ ] one\n- [ ] retry\n- [ ] retry\n",
+			new:  "- [ ] retry\n- [ ] retry\n",
+			want: 0,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := webhook.NewlyChecked(tc.old, tc.new)
+			if len(got) != tc.want {
+				t.Fatalf("NewlyChecked() returned %d items, want %d: %+v", len(got), tc.want, got)
+			}
+		})
+	}
+}
+
+// TestNewlyCheckedMarkedItemsAreUnaffected makes sure the guard above does not
+// weaken the normal path, where Renovate's markers make every key unique.
+func TestNewlyCheckedMarkedItemsAreUnaffected(t *testing.T) {
+	t.Parallel()
+
+	old := "- [ ] <!-- manual job -->Run again\n- [x] <!-- rebase-check -->Rebase\n"
+	updated := "- [x] <!-- manual job -->Run again\n- [x] <!-- rebase-check -->Rebase\n"
+
+	got := webhook.NewlyChecked(old, updated)
+	if len(got) != 1 || got[0].Marker != "manual job" {
+		t.Fatalf("NewlyChecked() = %+v, want only the manual job box", got)
+	}
+}
+
 func replaceOnce(t *testing.T, body, old, updated string) string {
 	t.Helper()
 	out := strings.Replace(body, old, updated, 1)

@@ -65,21 +65,44 @@ func ParseTaskList(body string) []TaskItem {
 // NewlyChecked reports the task items that are ticked in newBody but were not
 // ticked in oldBody. Items that only appear in newBody count as newly ticked:
 // a human adding an already ticked box is still a request to act.
+//
+// Items are matched by key, and by position among the items sharing that key.
+// Renovate marks each of its controls with a distinct HTML comment, so its
+// keys are unique and the position never matters. Keys can repeat only on the
+// label fallback, where positions shift as items are added or removed and a
+// positional match alone would report an item that was already ticked under a
+// different index. Requiring the number of ticked items under a key to have
+// grown keeps those out.
 func NewlyChecked(oldBody, newBody string) []TaskItem {
 	before := make(map[string][]bool)
+	tickedBefore := make(map[string]int)
 	for _, item := range ParseTaskList(oldBody) {
 		before[item.Key] = append(before[item.Key], item.Checked)
+		if item.Checked {
+			tickedBefore[item.Key]++
+		}
+	}
+
+	after := ParseTaskList(newBody)
+	tickedAfter := make(map[string]int)
+	for _, item := range after {
+		if item.Checked {
+			tickedAfter[item.Key]++
+		}
 	}
 
 	seen := make(map[string]int)
 	var checked []TaskItem
-	for _, item := range ParseTaskList(newBody) {
+	for _, item := range after {
 		occurrence := seen[item.Key]
 		seen[item.Key]++
 		if !item.Checked {
 			continue
 		}
 		if prev := before[item.Key]; occurrence < len(prev) && prev[occurrence] {
+			continue
+		}
+		if tickedAfter[item.Key] <= tickedBefore[item.Key] {
 			continue
 		}
 		checked = append(checked, item)
