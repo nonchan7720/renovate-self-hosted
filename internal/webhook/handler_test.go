@@ -2,6 +2,7 @@ package webhook_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -292,6 +293,78 @@ func TestHandlerConfigPush(t *testing.T) {
 	if got := queue.jobs[0].Details; len(got) != 1 || got[0] != ".github/renovate.json" {
 		t.Errorf("Details = %v, want [.github/renovate.json] without duplicates", got)
 	}
+}
+
+// TestHandlerTruncatedPush covers GitHub capping the commits array at 20 with
+// no field saying it did: a config change can hide in a commit the payload
+// never carried, so a push at the cap must run rather than be skipped.
+func TestHandlerTruncatedPush(t *testing.T) {
+	t.Parallel()
+
+	commits := func(n int) []any {
+		out := make([]any, 0, n)
+		for i := range n {
+			out = append(out, map[string]any{
+				"id":       fmt.Sprintf("commit-%d", i),
+				"modified": []string{fmt.Sprintf("internal/thing%d.go", i)},
+			})
+		}
+		return out
+	}
+	push := func(n int) map[string]any {
+		return map[string]any{
+			"ref":        "refs/heads/main",
+			"repository": map[string]any{"full_name": "acme/api", "default_branch": "main"},
+			"commits":    commits(n),
+		}
+	}
+
+	t.Run("at the cap", func(t *testing.T) {
+		t.Parallel()
+
+		h, queue := newTestHandler(t, testTrigger())
+		rec := post(t, h, "push", push(webhook.MaxPushCommits))
+
+		if got := decodeStatus(t, rec); got != "queued" {
+			t.Fatalf("status = %q, want %q (%s)", got, "queued", rec.Body)
+		}
+		if len(queue.jobs) != 1 {
+			t.Fatalf("enqueued %d jobs, want 1", len(queue.jobs))
+		}
+		if got := queue.jobs[0].Details; len(got) != 1 || !strings.Contains(got[0], "truncated") {
+			t.Errorf("Details = %v, want the truncation to be explained", got)
+		}
+	})
+
+	t.Run("below the cap", func(t *testing.T) {
+		t.Parallel()
+
+		h, queue := newTestHandler(t, testTrigger())
+		rec := post(t, h, "push", push(webhook.MaxPushCommits-1))
+
+		if got := decodeStatus(t, rec); got != "ignored" {
+			t.Fatalf("status = %q, want %q (%s)", got, "ignored", rec.Body)
+		}
+		if len(queue.jobs) != 0 {
+			t.Fatalf("enqueued %d jobs, want 0", len(queue.jobs))
+		}
+	})
+
+	t.Run("at the cap with a real config change", func(t *testing.T) {
+		t.Parallel()
+
+		h, queue := newTestHandler(t, testTrigger())
+		payload := push(webhook.MaxPushCommits)
+		payload["commits"].([]any)[3].(map[string]any)["modified"] = []string{"renovate.json"}
+
+		rec := post(t, h, "push", payload)
+		if got := decodeStatus(t, rec); got != "queued" {
+			t.Fatalf("status = %q, want %q", got, "queued")
+		}
+		if got := queue.jobs[0].Details; len(got) != 1 || got[0] != "renovate.json" {
+			t.Errorf("Details = %v, want the actual path rather than the truncation note", got)
+		}
+	})
 }
 
 func TestHandlerRejectsBadRequests(t *testing.T) {

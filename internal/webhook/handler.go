@@ -18,6 +18,10 @@ import (
 // payloads above 25 MB, and Renovate's deliveries are far smaller.
 const MaxBodyBytes = 5 << 20
 
+// MaxPushCommits is how many commits GitHub includes in a push payload. A
+// larger push is delivered truncated, without any field saying so.
+const MaxPushCommits = 20
+
 // Enqueuer accepts jobs produced from webhook events.
 type Enqueuer interface {
 	Enqueue(job dispatch.Job)
@@ -231,13 +235,28 @@ func (h *Handler) handlePush(delivery string, body []byte, logger *slog.Logger) 
 			}
 		}
 	}
+
+	// GitHub caps the commits array at MaxPushCommits and sets no flag saying
+	// it did. A push at the cap may well have touched a config file in a
+	// commit we cannot see, so run rather than silently skip.
+	truncated := len(touched) == 0 && len(ev.Commits) >= MaxPushCommits
+	if truncated {
+		touched = append(touched, fmt.Sprintf("commit list truncated at %d, config file changes cannot be ruled out", MaxPushCommits))
+	}
+
 	if len(touched) == 0 {
 		return result{Status: statusIgnored, Reason: "no Renovate configuration file changed"}, nil
 	}
 
-	logger.Info("renovate configuration changed",
-		slog.String("repository", ev.Repository.FullName),
-		slog.Any("paths", touched))
+	if truncated {
+		logger.Info("push commit list truncated, running to be safe",
+			slog.String("repository", ev.Repository.FullName),
+			slog.Int("commits", len(ev.Commits)))
+	} else {
+		logger.Info("renovate configuration changed",
+			slog.String("repository", ev.Repository.FullName),
+			slog.Any("paths", touched))
+	}
 
 	h.queue.Enqueue(dispatch.Job{
 		Repository: ev.Repository.FullName,
