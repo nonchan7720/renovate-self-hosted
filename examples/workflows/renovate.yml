@@ -1,0 +1,101 @@
+# Renovate runner workflow.
+#
+# Copy this file to .github/workflows/renovate.yml in the repository that runs
+# self-hosted Renovate (RUNNER_REPOSITORY), not in this one. renovate-webhook
+# starts a run by calling the workflow_dispatch API for this workflow, so the
+# file has to exist on the runner repository's default branch before the first
+# dispatch works.
+#
+# Required secret:
+#   RENOVATE_TOKEN  a personal access token, or a GitHub App token, with access
+#                   to every repository Renovate should manage.
+name: Renovate
+
+on:
+  workflow_dispatch:
+    inputs:
+      # renovate-webhook fills this in with the repository whose Dependency
+      # Dashboard or pull request checkbox was ticked. It must match
+      # RUNNER_REPOSITORY_INPUT.
+      repositories:
+        description: "Comma separated owner/repo list. Empty runs autodiscovery."
+        required: false
+        type: string
+      logLevel:
+        description: "Renovate log level"
+        required: false
+        default: info
+        type: choice
+        options:
+          - debug
+          - info
+          - warn
+          - error
+      dryRun:
+        description: "Renovate dry run mode"
+        required: false
+        default: disabled
+        type: choice
+        options:
+          - disabled
+          - extract
+          - lookup
+          - full
+  schedule:
+    # Full autodiscovery sweep; the webhook covers everything in between.
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialise runs per target so two dispatches for the same repository cannot
+  # race each other into duplicate pull requests.
+  group: renovate-${{ inputs.repositories || 'autodiscover' }}
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    name: Run Renovate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run Renovate
+        env:
+          RENOVATE_IMAGE: ghcr.io/renovatebot/renovate:latest
+          RENOVATE_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+          RENOVATE_ENDPOINT: ${{ github.api_url }}
+          REPOSITORIES: ${{ inputs.repositories }}
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
+          DRY_RUN: ${{ inputs.dryRun || 'disabled' }}
+        run: |
+          set -euo pipefail
+
+          args=(
+            --rm
+            --env RENOVATE_PLATFORM=github
+            --env RENOVATE_TOKEN
+            --env RENOVATE_ENDPOINT
+            --env LOG_LEVEL
+          )
+
+          if [ -n "${REPOSITORIES}" ]; then
+            args+=(--env "RENOVATE_REPOSITORIES=${REPOSITORIES}")
+          else
+            args+=(--env RENOVATE_AUTODISCOVER=true)
+          fi
+
+          if [ "${DRY_RUN}" != "disabled" ]; then
+            args+=(--env "RENOVATE_DRY_RUN=${DRY_RUN}")
+          fi
+
+          # Global Renovate config kept next to this workflow, if any.
+          if [ -f config.js ]; then
+            args+=(
+              --volume "${PWD}/config.js:/renovate/config.js:ro"
+              --env RENOVATE_CONFIG_FILE=/renovate/config.js
+            )
+          fi
+
+          docker run "${args[@]}" "${RENOVATE_IMAGE}"

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "include-component-in-tag": false,
+      "extra-files": [
+        "deploy/helm/renovate-webhook/Chart.yaml"
+      ]
+    }
+  }
+}

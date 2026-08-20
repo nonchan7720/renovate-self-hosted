@@ -1,0 +1,13 @@
+apiVersion: v2
+name: renovate-webhook
+description: Receives GitHub webhooks and starts self-hosted Renovate runs by dispatching a workflow in a separate runner repository
+type: application
+version: 0.1.0 # x-release-please-version
+appVersion: "0.1.0" # x-release-please-version
+home: https://github.com/nonchan7720/renovate-self-hosted
+sources:
+  - https://github.com/nonchan7720/renovate-self-hosted
+keywords:
+  - renovate
+  - webhook
+  - dependencies
