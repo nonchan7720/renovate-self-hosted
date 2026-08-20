@@ -173,6 +173,19 @@ merging to `main` maintains a release pull request from the commit messages, and
 merging that tags the version, which in turn publishes the image and the chart.
 The chart's `version` and `appVersion` are kept in step with the tag.
 
+An image carries exactly one kind of tag, so it is always clear which build a
+deployment is running:
+
+| Tag | Published on | For |
+| --- | --- | --- |
+| the commit hash, e.g. `1a2b3c4` | every push to `main` | staging |
+| the version, e.g. `0.1.0` | a published release | production |
+
+There is deliberately no `latest` or moving major/minor tag. Point staging at a
+hash with `--set image.tag=1a2b3c4`; production takes the version from the
+chart's `appVersion` and needs no override. The chart itself is only published
+for a release, since its version comes from `Chart.yaml`.
+
 The service has no third-party dependencies; everything is standard library.
 
 | Package | Responsibility |
