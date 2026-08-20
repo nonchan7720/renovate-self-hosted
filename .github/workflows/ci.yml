@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Installs the Go and golangci-lint versions pinned in mise.toml.
+      - uses: jdx/mise-action@v2
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Lint
+        run: golangci-lint run
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            echo "gofmt needs to run on:"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+  docker:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        run: docker build --tag renovate-webhook:ci .
