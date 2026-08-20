@@ -85,6 +85,31 @@ default branch before `workflow_dispatch` will accept it.
 
 ### 2. This service
 
+On Kubernetes, with the chart in [`deploy/helm/renovate-webhook`](deploy/helm/renovate-webhook):
+
+```sh
+kubectl create secret generic renovate-webhook \
+  --from-literal=RENOVATE_WEBHOOK_SECRET=... \
+  --from-literal=GITHUB_TOKEN=...
+
+helm install renovate-webhook deploy/helm/renovate-webhook \
+  --set config.runnerRepository=acme/renovate-runner \
+  --set secret.existingSecret=renovate-webhook \
+  --set ingress.enabled=true \
+  --set ingress.hosts[0].host=renovate-webhook.example.com
+```
+
+The chart can also create the secret from values (`secret.webhookSecret`,
+`secret.githubToken`) for a quick trial. `helm install --set config.dryRun=true`
+logs the decisions without dispatching anything. Everything else is documented
+in [`values.yaml`](deploy/helm/renovate-webhook/values.yaml); the chart refuses
+to install rather than crash-looping when a required value is missing.
+
+The image has to be somewhere the cluster can pull it — set
+`image.repository` and `image.tag` to wherever you publish it.
+
+Or plain Docker:
+
 ```sh
 docker build -t renovate-webhook .
 docker run --rm -p 8080:8080 \
@@ -96,6 +121,13 @@ docker run --rm -p 8080:8080 \
 
 Start with `-e DRY_RUN=true` to watch the decisions in the logs without
 dispatching anything.
+
+#### Replicas
+
+The debounce state lives in memory, so each replica only coalesces the events
+it received itself: two replicas can dispatch two runs for the same repository.
+The runner workflow serialises those with a concurrency group, so the cost is
+an extra run rather than a race. The chart defaults to a single replica.
 
 ### 3. GitHub webhook
 
@@ -109,12 +141,15 @@ type `application/json`, the same secret, and these events:
 ## Development
 
 The toolchain is pinned in [`mise.toml`](mise.toml) (Go 1.26.7, golangci-lint
-2.12.2):
+2.12.2, Helm 4.2.4):
 
 ```sh
 mise install
 go test -race ./...
 golangci-lint run
+helm lint deploy/helm/renovate-webhook \
+  --set config.runnerRepository=acme/renovate-runner \
+  --set secret.webhookSecret=example --set secret.githubToken=example
 ```
 
 The service has no third-party dependencies; everything is standard library.
@@ -126,3 +161,4 @@ The service has no third-party dependencies; everything is standard library.
 | `internal/queue` | Per-repository debouncing |
 | `internal/dispatch` | `workflow_dispatch` client with retries |
 | `internal/server` | HTTP server, health probes, graceful shutdown |
+| `deploy/helm` | Helm chart for running the service on Kubernetes |
