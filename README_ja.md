@@ -29,6 +29,11 @@ flowchart LR
 | `pull_request` (`edited`) | Renovate の PR 本文のチェックボックスが未チェックからチェックに変わった（rebase/retry のボックスなど） | `pull-request-checkbox` |
 | `push` | デフォルトブランチで Renovate の設定ファイルが変更された | `config-push` |
 
+push のペイロードに含まれるコミットは最大20件で、GitHub が切り詰めたかどうかを示す
+フィールドはありません。そのため上限に達している push は「設定が変更された可能性がある」
+とみなして実行します。ペイロードに載らなかったコミットでの変更を黙って取りこぼすよりは、
+余分に1回走るほうがましなので。
+
 それ以外はすべて `200 {"status":"ignored"}` と理由を返します。GitHub の配信ログが
 赤くならず、なぜ何も起きなかったのかがそのまま分かります。
 
@@ -65,7 +70,7 @@ flowchart LR
 | `RUNNER_WORKFLOW` | `renovate.yml` | dispatch するワークフローのファイル名（または数値 ID）。 |
 | `RUNNER_REF` | `main` | ワークフローを実行する Git ref。 |
 | `RUNNER_REPOSITORY_INPUT` | `repositories` | 対象の `owner/repo` を受け取るワークフロー入力の名前。 |
-| `RUNNER_EXTRA_INPUTS` | — | 追加の入力を `key=value,key=value` 形式で。ワークフローが宣言していない入力を送ると GitHub は dispatch 全体を拒否します。 |
+| `RUNNER_EXTRA_INPUTS` | — | 追加の入力を `key=value,key=value` 形式で。`=` を含まない断片は直前の値の続きとして扱われるため、値自体にカンマを含められます（`labels=area/foo,area/bar`）。ワークフローが宣言していない入力を送ると GitHub は dispatch 全体を拒否します。 |
 | `RENOVATE_BOT_LOGINS` | `renovate[bot],renovate-bot` | issue や PR の作成者として Renovate とみなすアカウント。 |
 | `ALLOWED_REPOSITORIES` | — | 任意の許可リスト。`owner/repo` または `owner/*`。空ならすべて許可。 |
 | `TRIGGER_ON_PUSH` | `true` | 設定ファイルの push で実行するかどうか。 |

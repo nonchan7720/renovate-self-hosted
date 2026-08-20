@@ -29,6 +29,11 @@ flowchart LR
 | `pull_request` (`edited`) | A checkbox in a Renovate pull request body went from unticked to ticked, for example the rebase/retry box | `pull-request-checkbox` |
 | `push` | A Renovate configuration file changed on the default branch | `config-push` |
 
+A push payload carries at most 20 commits, and nothing in it says whether
+GitHub truncated the list. A push at that limit is therefore treated as a
+possible config change and runs anyway, rather than silently skipping one that
+happened in a commit the payload never carried.
+
 Everything else is answered with `200 {"status":"ignored"}` and a reason, so
 GitHub's delivery log stays green and it is obvious why nothing happened.
 
@@ -65,7 +70,7 @@ All configuration comes from the environment.
 | `RUNNER_WORKFLOW` | `renovate.yml` | Workflow file name (or numeric ID) to dispatch. |
 | `RUNNER_REF` | `main` | Git ref the workflow runs on. |
 | `RUNNER_REPOSITORY_INPUT` | `repositories` | Workflow input that receives the target `owner/repo`. |
-| `RUNNER_EXTRA_INPUTS` | — | Extra inputs as `key=value,key=value`. Only inputs the workflow declares may be sent; GitHub rejects the whole dispatch otherwise. |
+| `RUNNER_EXTRA_INPUTS` | — | Extra inputs as `key=value,key=value`. A fragment without an `=` continues the previous value, so a value may contain commas (`labels=area/foo,area/bar`). Only inputs the workflow declares may be sent; GitHub rejects the whole dispatch otherwise. |
 | `RENOVATE_BOT_LOGINS` | `renovate[bot],renovate-bot` | Accounts whose issues and pull requests count as Renovate's. |
 | `ALLOWED_REPOSITORIES` | — | Optional allow list, `owner/repo` or `owner/*`. Empty allows every repository. |
 | `TRIGGER_ON_PUSH` | `true` | Whether config pushes trigger a run. |
