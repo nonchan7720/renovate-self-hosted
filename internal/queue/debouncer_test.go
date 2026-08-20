@@ -2,6 +2,7 @@ package queue_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -149,6 +150,124 @@ func TestDebouncerHonoursMaxWait(t *testing.T) {
 	}
 	if job.Repository != "acme/api" {
 		t.Fatalf("Repository = %q", job.Repository)
+	}
+}
+
+// timedRecorder is like collector but never blocks the dispatching goroutine,
+// so a failed assertion mid-test can never leave Close's wg.Wait hanging on a
+// send nobody is left to receive.
+type timedRecorder struct {
+	mu    sync.Mutex
+	jobs  []dispatch.Job
+	times []time.Time
+}
+
+func (r *timedRecorder) Dispatch(_ context.Context, job dispatch.Job) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.jobs = append(r.jobs, job)
+	r.times = append(r.times, time.Now())
+	return nil
+}
+
+func (r *timedRecorder) snapshot() ([]dispatch.Job, []time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]dispatch.Job(nil), r.jobs...), append([]time.Time(nil), r.times...)
+}
+
+// TestDebouncerMergeAfterFire covers the timer firing and its flush blocking
+// on d.mu at the exact moment Enqueue takes the merge path. A bare
+// timer.Reset there schedules a second firing without retracting the one
+// already in flight, so the blocked flush dispatches the instant Enqueue
+// releases the lock instead of waiting out the extended delay -- even though
+// the merge itself already folded the new reason into the job beforehand, so
+// the dispatch is not missing data, only early.
+//
+// Landing inside that race deliberately is not possible from outside the
+// package, so several repositories each sleep a full window -- long enough
+// for their timer to plausibly fire and its flush to be scheduled -- and
+// then immediately fire a burst of merges, giving that flush many chances to
+// be blocked on d.mu exactly when a merge takes the lock. Some bursts will
+// still legitimately outrun the window and split across more than one
+// dispatch, which is fine; what must never happen, split or not, is a
+// dispatch whose newest reason was merged less than half a window before it
+// fired, which is the fingerprint of a lost extension.
+func TestDebouncerMergeAfterFire(t *testing.T) {
+	t.Parallel()
+
+	const (
+		window = 5 * time.Millisecond
+		repos  = 20
+		burst  = 60
+		rounds = 3
+	)
+
+	rec := &timedRecorder{}
+	d := queue.New(config.Debounce{Window: window, MaxWait: time.Second}, rec, discardLogger())
+	t.Cleanup(func() { _ = d.Close(context.Background()) })
+
+	var reasonAt sync.Map // reason -> time.Time its Enqueue call was made
+
+	var wg sync.WaitGroup
+	for r := range repos {
+		wg.Add(1)
+		go func(r int) {
+			defer wg.Done()
+			repo := fmt.Sprintf("acme/merge-race-%d", r)
+			n := 0
+			enqueue := func() {
+				reason := fmt.Sprintf("%s-%d", repo, n)
+				n++
+				reasonAt.Store(reason, time.Now())
+				d.Enqueue(dispatch.Job{Repository: repo, Reasons: []string{reason}})
+			}
+			for range rounds {
+				enqueue()
+				time.Sleep(window)
+				for range burst {
+					enqueue()
+				}
+			}
+		}(r)
+	}
+	wg.Wait()
+	time.Sleep(2 * window) // let the last legitimate firing land
+
+	jobs, times := rec.snapshot()
+
+	// A lost extension dispatches almost immediately after the merge that
+	// should have pushed it out by a further window, so demand comfortably
+	// more than zero without requiring the full window (scheduling jitter
+	// can delay even a legitimate firing further still).
+	const minElapsed = window / 2
+
+	seen := map[string]int{}
+	for i, job := range jobs {
+		var newest time.Time
+		var newestReason string
+		for _, reason := range job.Reasons {
+			seen[reason]++
+			v, ok := reasonAt.Load(reason)
+			if !ok {
+				t.Fatalf("dispatch contains unknown reason %q", reason)
+			}
+			if at := v.(time.Time); at.After(newest) {
+				newest, newestReason = at, reason
+			}
+		}
+		if elapsed := times[i].Sub(newest); elapsed < minElapsed {
+			t.Errorf("dispatch %v arrived %s after %q was merged, want at least %s (an extension was lost)",
+				job.Reasons, elapsed, newestReason, minElapsed)
+		}
+	}
+	for r := range repos {
+		for n := range rounds * (burst + 1) {
+			reason := fmt.Sprintf("acme/merge-race-%d-%d", r, n)
+			if seen[reason] != 1 {
+				t.Errorf("reason %q dispatched %d times, want exactly 1", reason, seen[reason])
+			}
+		}
 	}
 }
 

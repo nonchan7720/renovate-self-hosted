@@ -90,7 +90,20 @@ func (d *Debouncer) Enqueue(job dispatch.Job) {
 	if delay <= 0 {
 		delay = 0
 	}
-	existing.timer.Reset(delay)
+	if !existing.timer.Stop() {
+		// The timer already fired and its flush is blocked on d.mu, waiting
+		// for us to release it. Reset alone would schedule a second firing
+		// without cancelling that one, so the extension would be lost the
+		// moment we unlock. Bump the gen instead: the in-flight flush will
+		// find it stale and no-op, leaving the new timer as the sole source
+		// of truth.
+		d.nextGen++
+		existing.gen = d.nextGen
+		repository, gen := job.Repository, existing.gen
+		existing.timer = time.AfterFunc(delay, func() { d.flush(repository, gen) })
+	} else {
+		existing.timer.Reset(delay)
+	}
 	d.logger.Debug("job merged",
 		slog.String("repository", job.Repository),
 		slog.Duration("in", delay))
