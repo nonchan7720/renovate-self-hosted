@@ -12,8 +12,10 @@ Webhook URL to configure in GitHub:
 {{- range $host := .Values.ingress.hosts }}
 {{- $scheme := "http" }}
 {{- range $tls := $.Values.ingress.tls }}
-{{- if and $tls.hosts (has $host.host $tls.hosts) }}
+{{- range $tlsHost := $tls.hosts }}
+{{- if or (eq $tlsHost $host.host) (and (hasPrefix "*." $tlsHost) (hasSuffix (trimPrefix "*" $tlsHost) $host.host)) }}
 {{- $scheme = "https" }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- range $host.paths }}
