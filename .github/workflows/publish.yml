@@ -3,6 +3,8 @@ name: Publish
 on:
   release:
     types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -104,11 +106,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
-            type=sha,prefix=dev-,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=,enable=${{ github.event_name != 'release' }}
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
 
       - name: Create and push manifest list
         working-directory: /tmp/digests
@@ -138,6 +137,10 @@ jobs:
 
   chart:
     name: Package and push chart
+    # The chart is packaged and pushed at whatever version is currently in
+    # Chart.yaml, so running this on every push to main would push that same
+    # version repeatedly, overwriting it in the registry each time.
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
