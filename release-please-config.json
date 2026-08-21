@@ -5,7 +5,16 @@
       "release-type": "go",
       "include-component-in-tag": false,
       "extra-files": [
-        "deploy/helm/renovate-webhook/Chart.yaml"
+        {
+          "type": "yaml",
+          "path": "deploy/helm/renovate-webhook/Chart.yaml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "deploy/helm/renovate-webhook/Chart.yaml",
+          "jsonpath": "$.appVersion"
+        }
       ]
     }
   }
