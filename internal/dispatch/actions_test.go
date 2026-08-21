@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -28,10 +29,23 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// fakeTokenSource is a test-only TokenSource, standing in for the real
+// GitHub App token minting done by internal/githubapp.
+type fakeTokenSource struct {
+	token string
+	err   error
+	calls atomic.Int32
+}
+
+func (f *fakeTokenSource) Token(context.Context) (string, error) {
+	f.calls.Add(1)
+	return f.token, f.err
+}
+
 // newTestActions points a dispatcher at srv and makes its retry backoff
 // instant so the tests stay fast.
 func newTestActions(srv *httptest.Server, runner config.Runner) *Actions {
-	a := NewActions(srv.URL, "test-token", runner, srv.Client(), discardLogger())
+	a := NewActions(srv.URL, &fakeTokenSource{token: "test-token"}, runner, srv.Client(), discardLogger())
 	a.sleep = func(context.Context, time.Duration) error { return nil }
 	return a
 }
@@ -334,6 +348,67 @@ func TestActionsDispatchStopsOnCancelledContext(t *testing.T) {
 
 	if err := newTestActions(srv, testRunner()).Dispatch(ctx, Job{Repository: "acme/api"}); err == nil {
 		t.Fatal("Dispatch() = nil, want an error")
+	}
+}
+
+// TestActionsDispatchEmptyTokenIsAnError covers a TokenSource that reports
+// success but hands back an empty string. Unlike the old static-PAT source,
+// there is no longer a legitimate "unauthenticated dispatch" case, so this
+// must fail loudly (and never reach GitHub) instead of sending a bearer-less
+// request that GitHub would just reject with 401 anyway.
+func TestActionsDispatchEmptyTokenIsAnError(t *testing.T) {
+	t.Parallel()
+
+	var serverCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		serverCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	a := NewActions(srv.URL, &fakeTokenSource{token: ""}, testRunner(), srv.Client(), discardLogger())
+	a.sleep = func(context.Context, time.Duration) error { return nil }
+
+	err := a.Dispatch(t.Context(), Job{Repository: "acme/api"})
+	if err == nil {
+		t.Fatal("Dispatch() = nil, want an error")
+	}
+	if serverCalls.Load() != 0 {
+		t.Errorf("github called %d times, want 0 (an empty token must never be sent)", serverCalls.Load())
+	}
+}
+
+// TestActionsDispatchTokenFetchErrorIsRetried covers a TokenSource failure,
+// e.g. a transient error minting a fresh GitHub App installation token. It
+// is treated the same as a network blip against the dispatch endpoint
+// itself: retried up to the normal attempt budget, without ever reaching
+// GitHub since there was no token to send.
+func TestActionsDispatchTokenFetchErrorIsRetried(t *testing.T) {
+	t.Parallel()
+
+	var serverCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		serverCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	tokens := &fakeTokenSource{err: errors.New("mint installation token: boom")}
+	a := NewActions(srv.URL, tokens, testRunner(), srv.Client(), discardLogger())
+	a.sleep = func(context.Context, time.Duration) error { return nil }
+
+	err := a.Dispatch(t.Context(), Job{Repository: "acme/api"})
+	if err == nil {
+		t.Fatal("Dispatch() = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error = %v, want it to wrap the token source's error", err)
+	}
+	if got := tokens.calls.Load(); got != maxAttempts {
+		t.Errorf("token source called %d times, want %d", got, maxAttempts)
+	}
+	if serverCalls.Load() != 0 {
+		t.Errorf("github called %d times, want 0 (no token, no request)", serverCalls.Load())
 	}
 }
 

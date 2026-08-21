@@ -13,6 +13,7 @@ import (
 
 	"github.com/nonchan7720/renovate-self-hosted/internal/config"
 	"github.com/nonchan7720/renovate-self-hosted/internal/dispatch"
+	"github.com/nonchan7720/renovate-self-hosted/internal/githubapp"
 	"github.com/nonchan7720/renovate-self-hosted/internal/queue"
 	"github.com/nonchan7720/renovate-self-hosted/internal/server"
 	"github.com/nonchan7720/renovate-self-hosted/internal/webhook"
@@ -38,7 +39,13 @@ func run() error {
 	if cfg.DryRun {
 		dispatcher = dispatch.NewDryRun(logger)
 	} else {
-		dispatcher = dispatch.NewActions(cfg.GitHubAPIURL, cfg.GitHubToken, cfg.Runner, nil, logger)
+		// A bad private key fails here, at startup, not as an opaque signing error on the first delivery.
+		tokens, err := githubapp.New(cfg.GitHubAPIURL, cfg.GitHubAppID, cfg.GitHubAppPrivateKey,
+			cfg.GitHubAppInstallationID, cfg.Runner.Repository, nil)
+		if err != nil {
+			return fmt.Errorf("configure github app: %w", err)
+		}
+		dispatcher = dispatch.NewActions(cfg.GitHubAPIURL, tokens, cfg.Runner, nil, logger)
 	}
 
 	debouncer := queue.New(cfg.Debounce, dispatcher, logger)
@@ -50,6 +57,7 @@ func run() error {
 		slog.String("runner_repository", cfg.Runner.Repository),
 		slog.String("runner_workflow", cfg.Runner.Workflow),
 		slog.String("runner_ref", cfg.Runner.Ref),
+		slog.String("auth_method", authMethod(cfg)),
 		slog.Bool("dry_run", cfg.DryRun),
 		slog.Bool("trigger_on_push", cfg.Trigger.OnPush),
 		slog.Duration("debounce_window", cfg.Debounce.Window))
@@ -72,4 +80,13 @@ func run() error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// authMethod reports which credential drives dispatch calls, without the key
+// or a token, so an operator can tell dry-run from the App they configured.
+func authMethod(cfg config.Config) string {
+	if cfg.DryRun {
+		return "dry-run"
+	}
+	return "github-app"
 }

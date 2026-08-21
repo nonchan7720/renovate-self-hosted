@@ -15,7 +15,8 @@ func setEnv(t *testing.T, overrides map[string]string) {
 
 	base := map[string]string{
 		"RENOVATE_WEBHOOK_SECRET": "secret",
-		"GITHUB_TOKEN":            "token",
+		"GITHUB_APP_ID":           "123456",
+		"GITHUB_APP_PRIVATE_KEY":  "pem-data",
 		"RUNNER_REPOSITORY":       "acme/renovate-runner",
 	}
 	for k, v := range overrides {
@@ -146,9 +147,23 @@ func TestLoadValidation(t *testing.T) {
 			env:    map[string]string{"RUNNER_REPOSITORY": "acme//renovate-runner"},
 			wantIn: []string{"owner/repo"},
 		},
-		"missing token without dry run": {
-			env:    map[string]string{"GITHUB_TOKEN": ""},
-			wantIn: []string{"GITHUB_TOKEN"},
+		"missing app credentials without dry run": {
+			env:    map[string]string{"GITHUB_APP_ID": "", "GITHUB_APP_PRIVATE_KEY": ""},
+			wantIn: []string{"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"},
+		},
+		"app id without private key": {
+			env:    map[string]string{"GITHUB_APP_PRIVATE_KEY": ""},
+			wantIn: []string{"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"},
+		},
+		"app private key without id": {
+			env:    map[string]string{"GITHUB_APP_ID": ""},
+			wantIn: []string{"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"},
+		},
+		"non-numeric installation id": {
+			env: map[string]string{
+				"GITHUB_APP_INSTALLATION_ID": "not-a-number",
+			},
+			wantIn: []string{"GITHUB_APP_INSTALLATION_ID"},
 		},
 		"bad duration": {
 			env:    map[string]string{"DEBOUNCE_WINDOW": "soon"},
@@ -247,14 +262,14 @@ func TestLoadExtraInputsWithCommas(t *testing.T) {
 	}
 }
 
-// TestLoadTrimsTokenAndRepository covers a token or repository name that
+// TestLoadTrimsAppIDAndRepository covers an App ID or repository name that
 // arrives with surrounding whitespace, routine when a secret is populated
-// from a file or an editor. Left untrimmed, the token breaks every dispatch's
-// Authorization header and the repository builds a malformed URL, both with
-// an error that says nothing about whitespace being the cause.
-func TestLoadTrimsTokenAndRepository(t *testing.T) {
+// from a file or an editor. Left untrimmed, the App ID breaks the JWT "iss"
+// claim and the repository builds a malformed URL, both with an error that
+// says nothing about whitespace being the cause.
+func TestLoadTrimsAppIDAndRepository(t *testing.T) {
 	setEnv(t, map[string]string{
-		"GITHUB_TOKEN":      "\ttoken-value\n",
+		"GITHUB_APP_ID":     "\t123456\n",
 		"RUNNER_REPOSITORY": "  acme/renovate-runner\n",
 	})
 
@@ -262,8 +277,8 @@ func TestLoadTrimsTokenAndRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() = %v", err)
 	}
-	if cfg.GitHubToken != "token-value" {
-		t.Errorf("GitHubToken = %q, want it trimmed", cfg.GitHubToken)
+	if cfg.GitHubAppID != "123456" {
+		t.Errorf("GitHubAppID = %q, want it trimmed", cfg.GitHubAppID)
 	}
 	if cfg.Runner.Repository != "acme/renovate-runner" {
 		t.Errorf("Runner.Repository = %q, want it trimmed", cfg.Runner.Repository)
@@ -289,8 +304,50 @@ func TestLoadUnsetAllowedRepositoriesPermitsEverything(t *testing.T) {
 	}
 }
 
-func TestLoadDryRunMakesTokenOptional(t *testing.T) {
-	setEnv(t, map[string]string{"GITHUB_TOKEN": "", "DRY_RUN": "true"})
+// TestLoadGitHubApp covers reading the three GitHub App environment
+// variables.
+func TestLoadGitHubApp(t *testing.T) {
+	setEnv(t, map[string]string{
+		"GITHUB_APP_ID":              "123456",
+		"GITHUB_APP_PRIVATE_KEY":     "-----BEGIN RSA PRIVATE KEY-----\npem-data\n-----END RSA PRIVATE KEY-----",
+		"GITHUB_APP_INSTALLATION_ID": "789",
+	})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if cfg.GitHubAppID != "123456" {
+		t.Errorf("GitHubAppID = %q, want %q", cfg.GitHubAppID, "123456")
+	}
+	if want := "-----BEGIN RSA PRIVATE KEY-----\npem-data\n-----END RSA PRIVATE KEY-----"; cfg.GitHubAppPrivateKey != want {
+		t.Errorf("GitHubAppPrivateKey = %q, want %q", cfg.GitHubAppPrivateKey, want)
+	}
+	if cfg.GitHubAppInstallationID != 789 {
+		t.Errorf("GitHubAppInstallationID = %d, want 789", cfg.GitHubAppInstallationID)
+	}
+}
+
+// TestLoadGitHubAppInstallationIDOptional covers that leaving
+// GITHUB_APP_INSTALLATION_ID unset resolves to the documented "look it up"
+// sentinel rather than failing validation.
+func TestLoadGitHubAppInstallationIDOptional(t *testing.T) {
+	setEnv(t, map[string]string{
+		"GITHUB_APP_ID":          "123456",
+		"GITHUB_APP_PRIVATE_KEY": "pem-data",
+	})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if cfg.GitHubAppInstallationID != 0 {
+		t.Errorf("GitHubAppInstallationID = %d, want 0 (unset)", cfg.GitHubAppInstallationID)
+	}
+}
+
+func TestLoadDryRunMakesAppCredentialsOptional(t *testing.T) {
+	setEnv(t, map[string]string{"GITHUB_APP_ID": "", "GITHUB_APP_PRIVATE_KEY": "", "DRY_RUN": "true"})
 
 	cfg, err := config.Load()
 	if err != nil {
