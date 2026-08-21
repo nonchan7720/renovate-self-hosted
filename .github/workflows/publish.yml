@@ -105,6 +105,10 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
+          # metadata-action's default flavor.latest=auto tags every semver
+          # release as `latest` too; turn that off explicitly.
+          flavor: |
+            latest=false
           tags: |
             type=sha,prefix=,enable=${{ github.event_name != 'release' }}
             type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
