@@ -54,10 +54,13 @@ jobs:
 
       - name: Lint chart
         run: |
+          # helm lint treats fail() as INFO and still exits 0, so this step
+          # cannot catch a missing required value; Render chart below can.
           helm lint deploy/helm/renovate-webhook \
             --set config.runnerRepository=acme/renovate-runner \
+            --set config.githubAppId=example \
             --set secret.webhookSecret=example \
-            --set secret.githubToken=example
+            --set secret.githubAppPrivateKey=example
 
       - name: Render chart
         run: |
@@ -65,10 +68,12 @@ jobs:
           # only breaks under one of them cannot slip through.
           helm template renovate-webhook deploy/helm/renovate-webhook \
             --set config.runnerRepository=acme/renovate-runner \
+            --set config.githubAppId=example \
             --set secret.webhookSecret=example \
-            --set secret.githubToken=example > /dev/null
+            --set secret.githubAppPrivateKey=example > /dev/null
           helm template renovate-webhook deploy/helm/renovate-webhook \
             --set config.runnerRepository=acme/renovate-runner \
+            --set config.githubAppId=example \
             --set secret.existingSecret=renovate-webhook \
             --set ingress.enabled=true \
             --set podDisruptionBudget.enabled=true \
