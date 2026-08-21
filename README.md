@@ -27,12 +27,20 @@ flowchart LR
 | --- | --- | --- |
 | `issues` (`edited`) | A checkbox on Renovate's Dependency Dashboard issue went from unticked to ticked | `dependency-dashboard-checkbox` |
 | `pull_request` (`edited`) | A checkbox in a Renovate pull request body went from unticked to ticked, for example the rebase/retry box | `pull-request-checkbox` |
-| `push` | A Renovate configuration file changed on the default branch | `config-push` |
+| `push` | Landed on the default branch and touched a Renovate config file | `config-push` |
+| `push` | Landed on the default branch (anything else) | `default-branch-push` |
 
-A push payload carries at most 20 commits, and nothing in it says whether
-GitHub truncated the list. A push at that limit is therefore treated as a
-possible config change and runs anyway, rather than silently skipping one that
-happened in a commit the payload never carried.
+Every push to the default branch dispatches a run, not just ones that touch a
+Renovate config file. GitHub sends a `push` event for a merge as much as for a
+direct push, and either one can leave an open Renovate pull request
+conflicted; only a fresh run rebases it. Which of the two reasons above gets
+reported depends on whether the push touched a path in `PUSH_CONFIG_PATHS`.
+
+A push payload carries at most 20 commits (`MaxPushCommits`), and nothing in
+it says whether GitHub truncated the list. That cap no longer decides whether
+a run happens — every default-branch push does — it only limits how far back
+path detection can see, so a config file changed in a commit past the cap can
+still be reported as `default-branch-push` instead of `config-push`.
 
 Everything else is answered with `200 {"status":"ignored"}` and a reason, so
 GitHub's delivery log stays green and it is obvious why nothing happened.
@@ -61,7 +69,9 @@ All configuration comes from the environment.
 | --- | --- | --- |
 | `RENOVATE_WEBHOOK_SECRET` | — | **Required.** Secret shared with the GitHub webhook, used for the `X-Hub-Signature-256` check. |
 | `RUNNER_REPOSITORY` | — | **Required.** `owner/repo` of the repository holding the Renovate runner workflow. |
-| `GITHUB_TOKEN` | — | **Required** unless `DRY_RUN=true`. Token allowed to dispatch that workflow (`actions: write`). |
+| `GITHUB_APP_ID` | — | **Required** unless `DRY_RUN=true`. App ID (or client ID) of the GitHub App used to dispatch the runner workflow. |
+| `GITHUB_APP_PRIVATE_KEY` | — | **Required** unless `DRY_RUN=true`. The App's private key, PEM-encoded, PKCS#1 or PKCS#8. |
+| `GITHUB_APP_INSTALLATION_ID` | — | Installation to mint tokens for. Leave unset to resolve it from `RUNNER_REPOSITORY`'s own installation; set it to dispatch through a separate App from the one that runs Renovate. |
 | `RENOVATE_WEBHOOK_ADDR` | `:8080` | Listen address. |
 | `RENOVATE_WEBHOOK_PATH` | `/webhook` | Path GitHub posts to. |
 | `RENOVATE_WEBHOOK_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
@@ -73,11 +83,18 @@ All configuration comes from the environment.
 | `RUNNER_EXTRA_INPUTS` | — | Extra inputs as `key=value,key=value`. A fragment without an `=` continues the previous value, so a value may contain commas (`labels=area/foo,area/bar`). Only inputs the workflow declares may be sent; GitHub rejects the whole dispatch otherwise. |
 | `RENOVATE_BOT_LOGINS` | `renovate[bot],renovate-bot` | Accounts whose issues and pull requests count as Renovate's. |
 | `ALLOWED_REPOSITORIES` | — | Optional allow list, `owner/repo` or `owner/*`. Unset allows every repository; set but containing no usable entry is a startup error rather than a silent "allow everything". |
-| `TRIGGER_ON_PUSH` | `true` | Whether config pushes trigger a run. |
+| `TRIGGER_ON_PUSH` | `true` | Whether default-branch pushes trigger a run. |
 | `PUSH_CONFIG_PATHS` | `renovate.json`, `renovate.json5`, `.renovaterc*`, `.github/renovate.json*`, `.gitlab/renovate.json` | Paths treated as Renovate configuration. |
 | `DEBOUNCE_WINDOW` | `10s` | Quiet period before a repository's run is dispatched. |
 | `DEBOUNCE_MAX_WAIT` | `2m` | Upper bound on that quiet period, so a busy repository still runs. |
 | `DRY_RUN` | `false` | Log what would be dispatched instead of calling GitHub. |
+
+The App needs exactly one permission: **Actions: write** on the runner
+repository, to call `workflow_dispatch`. It is easy to grant the App every
+permission Renovate itself needs and stop there — that leaves dispatch
+returning 403 with no obvious cause. The service signs its own JWT and mints
+installation tokens from it, refreshing them before they expire; there is
+nothing to rotate by hand.
 
 Endpoints: the webhook path, plus `GET /healthz` and `GET /readyz`.
 
@@ -97,20 +114,44 @@ On Kubernetes, with the chart in [`deploy/helm/renovate-webhook`](deploy/helm/re
 ```sh
 kubectl create secret generic renovate-webhook \
   --from-literal=RENOVATE_WEBHOOK_SECRET=... \
-  --from-literal=GITHUB_TOKEN=...
+  --from-file=GITHUB_APP_PRIVATE_KEY=./app-private-key.pem
 
 helm install renovate-webhook deploy/helm/renovate-webhook \
   --set config.runnerRepository=acme/renovate-runner \
+  --set config.githubAppId=123456 \
   --set secret.existingSecret=renovate-webhook \
   --set ingress.enabled=true \
   --set ingress.hosts[0].host=renovate-webhook.example.com
 ```
 
 The chart can also create the secret from values (`secret.webhookSecret`,
-`secret.githubToken`) for a quick trial. `helm install --set config.dryRun=true`
-logs the decisions without dispatching anything. Everything else is documented
-in [`values.yaml`](deploy/helm/renovate-webhook/values.yaml); the chart refuses
+`secret.githubAppPrivateKey`) for a quick trial. The private key is
+multi-line, so pass it through a values file (`-f`/`--values`) rather than
+`--set`, which mangles the PEM's newlines:
+
+```sh
+helm install renovate-webhook deploy/helm/renovate-webhook \
+  --set config.runnerRepository=acme/renovate-runner \
+  --set config.githubAppId=123456 \
+  --set secret.webhookSecret=... \
+  -f - <<'EOF'
+secret:
+  githubAppPrivateKey: |
+    -----BEGIN RSA PRIVATE KEY-----
+    ...
+    -----END RSA PRIVATE KEY-----
+EOF
+```
+
+`helm install --set config.dryRun=true` logs the decisions without
+dispatching anything. Everything else is documented in
+[`values.yaml`](deploy/helm/renovate-webhook/values.yaml); the chart refuses
 to install rather than crash-looping when a required value is missing.
+
+`deploymentAnnotations` sets annotations on the Deployment itself, separate
+from `podAnnotations` on the pod template: a controller that watches the
+Deployment rather than its pods, such as Stakater Reloader, needs them there
+to notice a secret rotation and roll the pods.
 
 Releases publish a multi-architecture image to
 `ghcr.io/nonchan7720/renovate-self-hosted` and the chart itself to
@@ -121,6 +162,7 @@ without a checkout:
 helm install renovate-webhook oci://ghcr.io/nonchan7720/charts/renovate-webhook \
   --version 0.1.0 \
   --set config.runnerRepository=acme/renovate-runner \
+  --set config.githubAppId=123456 \
   --set secret.existingSecret=renovate-webhook
 ```
 
@@ -130,7 +172,8 @@ Or plain Docker:
 docker build -t renovate-webhook .
 docker run --rm -p 8080:8080 \
   -e RENOVATE_WEBHOOK_SECRET=... \
-  -e GITHUB_TOKEN=... \
+  -e GITHUB_APP_ID=... \
+  -e GITHUB_APP_PRIVATE_KEY="$(cat app-private-key.pem)" \
   -e RUNNER_REPOSITORY=acme/renovate-runner \
   renovate-webhook
 ```
@@ -152,7 +195,15 @@ type `application/json`, the same secret, and these events:
 
 - **Issues** — Dependency Dashboard checkboxes
 - **Pull requests** — rebase/retry checkboxes
-- **Pushes** — optional, for Renovate config changes
+- **Pushes** — optional (`TRIGGER_ON_PUSH`), for default-branch pushes
+
+A GitHub App can deliver the same events itself, which avoids configuring a
+webhook per repository: point the App's **Webhook URL** at the service,
+subscribe it to the same three events, and set its **Webhook secret** to
+`RENOVATE_WEBHOOK_SECRET`. Every repository the App is installed on then
+delivers to this one endpoint. Signature verification is unchanged
+(`X-Hub-Signature-256`), so the service cannot tell the two delivery methods
+apart, and does not need to.
 
 ## Development
 
@@ -165,7 +216,8 @@ go test -race ./...
 golangci-lint run
 helm lint deploy/helm/renovate-webhook \
   --set config.runnerRepository=acme/renovate-runner \
-  --set secret.webhookSecret=example --set secret.githubToken=example
+  --set config.githubAppId=example \
+  --set secret.webhookSecret=example --set secret.githubAppPrivateKey=example
 ```
 
 Releases are managed by [release-please](https://github.com/googleapis/release-please):
@@ -192,6 +244,7 @@ The service has no third-party dependencies; everything is standard library.
 | --- | --- |
 | `internal/config` | Environment configuration and validation |
 | `internal/webhook` | Signature check, event routing, checkbox diffing |
+| `internal/githubapp` | GitHub App JWT signing and installation token caching |
 | `internal/queue` | Per-repository debouncing |
 | `internal/dispatch` | `workflow_dispatch` client with retries |
 | `internal/server` | HTTP server, health probes, graceful shutdown |

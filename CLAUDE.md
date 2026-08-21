@@ -41,8 +41,12 @@ GOTOOLCHAIN=go1.26.7 gofmt -l .          # must print nothing
 golangci-lint run
 helm lint deploy/helm/renovate-webhook \
   --set config.runnerRepository=acme/renovate-runner \
-  --set secret.webhookSecret=example --set secret.githubToken=example
+  --set config.githubAppId=example \
+  --set secret.webhookSecret=example --set secret.githubAppPrivateKey=example
 ```
+
+`helm lint` reports a template `fail` as INFO and still exits 0, so it cannot
+catch a missing required value on its own. `helm template` is what fails.
 
 All of these must be clean before a push. CI runs the same set.
 

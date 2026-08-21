@@ -19,7 +19,10 @@ import (
 const MaxBodyBytes = 5 << 20
 
 // MaxPushCommits is how many commits GitHub includes in a push payload. A
-// larger push is delivered truncated, without any field saying so.
+// larger push is delivered truncated, without any field saying so. Since
+// handlePush now dispatches on every default-branch push regardless of which
+// files changed, this only matters for whether path detection sees a config
+// file that landed in a commit past the cap.
 const MaxPushCommits = 20
 
 // Enqueuer accepts jobs produced from webhook events.
@@ -216,7 +219,11 @@ func (h *Handler) handleCheckboxEdit(delivery, action string, repo Repository, s
 	}, nil
 }
 
-// handlePush reacts to Renovate configuration changing on the default branch.
+// handlePush reacts to a push landing on the default branch. GitHub sends a
+// push event for a merge too, and a direct push bypasses pull_request
+// entirely, so every push there is dispatched, not just ones that touch a
+// Renovate config file: any of them can leave an open Renovate PR conflicted,
+// and only a fresh run rebases it.
 func (h *Handler) handlePush(delivery string, body []byte, logger *slog.Logger) (result, error) {
 	if !h.trigger.OnPush {
 		return result{Status: statusIgnored, Reason: "push triggers are disabled"}, nil
@@ -245,37 +252,27 @@ func (h *Handler) handlePush(delivery string, body []byte, logger *slog.Logger) 
 		}
 	}
 
-	// GitHub caps the commits array at MaxPushCommits and sets no flag saying
-	// it did. A push at the cap may well have touched a config file in a
-	// commit we cannot see, so run rather than silently skip.
-	truncated := len(touched) == 0 && len(ev.Commits) >= MaxPushCommits
-	if truncated {
-		touched = append(touched, fmt.Sprintf("commit list truncated at %d, config file changes cannot be ruled out", MaxPushCommits))
+	// PUSH_CONFIG_PATHS no longer decides whether we run; it only tells apart,
+	// in the reason we log, a config-driven run from a plain "main moved" one.
+	reason := dispatch.ReasonDefaultBranchPush
+	if len(touched) > 0 {
+		reason = dispatch.ReasonConfigPush
 	}
 
-	if len(touched) == 0 {
-		return result{Status: statusIgnored, Reason: "no Renovate configuration file changed"}, nil
-	}
-
-	if truncated {
-		logger.Info("push commit list truncated, running to be safe",
-			slog.String("repository", ev.Repository.FullName),
-			slog.Int("commits", len(ev.Commits)))
-	} else {
-		logger.Info("renovate configuration changed",
-			slog.String("repository", ev.Repository.FullName),
-			slog.Any("paths", touched))
-	}
+	logger.Info("push to the default branch",
+		slog.String("repository", ev.Repository.FullName),
+		slog.String("reason", reason),
+		slog.Any("paths", touched))
 
 	h.queue.Enqueue(dispatch.Job{
 		Repository: ev.Repository.FullName,
-		Reasons:    []string{dispatch.ReasonConfigPush},
+		Reasons:    []string{reason},
 		Details:    touched,
 		Deliveries: deliveries(delivery),
 	})
 	return result{
 		Status:     statusQueued,
-		Reason:     dispatch.ReasonConfigPush,
+		Reason:     reason,
 		Repository: ev.Repository.FullName,
 		Details:    touched,
 	}, nil

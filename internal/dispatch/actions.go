@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,13 +24,21 @@ const (
 	requestLimit = 30 * time.Second
 )
 
+// TokenSource supplies the bearer token used to authenticate dispatch
+// requests to GitHub. Kept as an interface, rather than importing
+// internal/githubapp's concrete type, so internal/dispatch does not depend on
+// internal/githubapp and tests can substitute their own source.
+type TokenSource interface {
+	Token(ctx context.Context) (string, error)
+}
+
 // Actions starts Renovate by triggering a workflow_dispatch on the repository
 // that hosts the self-hosted runner. The runner lives in its own repository, so
 // this service never executes Renovate itself.
 type Actions struct {
 	client *http.Client
 	apiURL string
-	token  string
+	tokens TokenSource
 	runner config.Runner
 	logger *slog.Logger
 	sleep  func(ctx context.Context, d time.Duration) error
@@ -37,7 +46,7 @@ type Actions struct {
 
 // NewActions builds an Actions dispatcher. A nil client or logger falls back to
 // a sensible default.
-func NewActions(apiURL, token string, runner config.Runner, client *http.Client, logger *slog.Logger) *Actions {
+func NewActions(apiURL string, tokens TokenSource, runner config.Runner, client *http.Client, logger *slog.Logger) *Actions {
 	if client == nil {
 		client = &http.Client{Timeout: requestLimit}
 	}
@@ -47,7 +56,7 @@ func NewActions(apiURL, token string, runner config.Runner, client *http.Client,
 	return &Actions{
 		client: client,
 		apiURL: strings.TrimSuffix(apiURL, "/"),
-		token:  token,
+		tokens: tokens,
 		runner: runner,
 		logger: logger,
 		sleep:  sleepCtx,
@@ -113,6 +122,18 @@ func (a *Actions) payload(job Job) map[string]any {
 // do performs a single attempt and reports whether the failure is worth
 // retrying, and how long GitHub asked us to wait before trying again.
 func (a *Actions) do(ctx context.Context, endpoint string, payload []byte) (retryable bool, retryAfter time.Duration, err error) {
+	// Minting the token is itself a call to GitHub, so a failure here is the
+	// same transient kind as a dispatch-endpoint blip and gets the same retry.
+	token, err := a.tokens.Token(ctx)
+	if err != nil {
+		return ctx.Err() == nil, 0, fmt.Errorf("get github token: %w", err)
+	}
+	if token == "" {
+		// A GitHub App token is never legitimately empty; treat it as the
+		// configuration bug it is rather than sending a request GitHub would reject.
+		return false, 0, errors.New("github token source returned an empty token")
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return false, 0, fmt.Errorf("build request: %w", err)
@@ -120,9 +141,7 @@ func (a *Actions) do(ctx context.Context, endpoint string, payload []byte) (retr
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if a.token != "" {
-		req.Header.Set("Authorization", "Bearer "+a.token)
-	}
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	res, err := a.client.Do(req)
 	if err != nil {

@@ -4,6 +4,10 @@ metadata:
   name: {{ include "renovate-webhook.fullname" . }}
   labels:
     {{- include "renovate-webhook.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -64,12 +68,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "renovate-webhook.secretName" . }}
                   key: {{ .Values.secret.webhookSecretKey }}
-            {{- if or .Values.secret.existingSecret .Values.secret.githubToken }}
-            - name: GITHUB_TOKEN
+            {{- if or .Values.secret.existingSecret .Values.secret.githubAppPrivateKey }}
+            - name: GITHUB_APP_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "renovate-webhook.secretName" . }}
-                  key: {{ .Values.secret.githubTokenKey }}
+                  key: {{ .Values.secret.githubAppPrivateKeyKey }}
                   {{- if .Values.config.dryRun }}
                   optional: true
                   {{- end }}

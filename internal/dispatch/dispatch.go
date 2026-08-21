@@ -12,6 +12,7 @@ const (
 	ReasonDashboardCheckbox   = "dependency-dashboard-checkbox"
 	ReasonPullRequestCheckbox = "pull-request-checkbox"
 	ReasonConfigPush          = "config-push"
+	ReasonDefaultBranchPush   = "default-branch-push"
 	ReasonManual              = "manual"
 )
 

@@ -51,7 +51,13 @@ type Config struct {
 	DryRun          bool
 
 	GitHubAPIURL string
-	GitHubToken  string
+
+	// GitHub App credentials, the only supported authentication method for
+	// dispatching the runner workflow. The PEM is parsed in internal/githubapp,
+	// so a bad key surfaces as a githubapp construction error, not here.
+	GitHubAppID             string
+	GitHubAppPrivateKey     string
+	GitHubAppInstallationID int64
 
 	Runner   Runner
 	Trigger  Trigger
@@ -129,7 +135,11 @@ func Load() (Config, error) {
 		Path:          envOr("RENOVATE_WEBHOOK_PATH", DefaultPath),
 		WebhookSecret: os.Getenv("RENOVATE_WEBHOOK_SECRET"),
 		GitHubAPIURL:  strings.TrimSuffix(envOr("GITHUB_API_URL", DefaultGitHubAPIURL), "/"),
-		GitHubToken:   strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
+
+		GitHubAppID: strings.TrimSpace(os.Getenv("GITHUB_APP_ID")),
+		// Only the surrounding whitespace is trimmed: the PEM body's internal
+		// newlines are significant and TrimSpace does not touch them.
+		GitHubAppPrivateKey: strings.TrimSpace(os.Getenv("GITHUB_APP_PRIVATE_KEY")),
 		Runner: Runner{
 			Repository:      strings.TrimSpace(os.Getenv("RUNNER_REPOSITORY")),
 			Workflow:        envOr("RUNNER_WORKFLOW", DefaultWorkflow),
@@ -167,6 +177,8 @@ func Load() (Config, error) {
 	collect(err)
 	cfg.Trigger.AllowedRepositories, err = envAllowedRepositories("ALLOWED_REPOSITORIES")
 	collect(err)
+	cfg.GitHubAppInstallationID, err = envInt64("GITHUB_APP_INSTALLATION_ID")
+	collect(err)
 
 	if cfg.WebhookSecret == "" {
 		collect(errors.New("RENOVATE_WEBHOOK_SECRET is required"))
@@ -176,8 +188,13 @@ func Load() (Config, error) {
 	} else if owner, repo, ok := strings.Cut(cfg.Runner.Repository, "/"); !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
 		collect(fmt.Errorf("RUNNER_REPOSITORY must be in owner/repo form, got %q", cfg.Runner.Repository))
 	}
-	if cfg.GitHubToken == "" && !cfg.DryRun {
-		collect(errors.New("GITHUB_TOKEN is required unless DRY_RUN=true"))
+	hasAppID := cfg.GitHubAppID != ""
+	hasAppKey := cfg.GitHubAppPrivateKey != ""
+	if hasAppID != hasAppKey {
+		collect(errors.New("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be set together"))
+	}
+	if !hasAppID && !hasAppKey && !cfg.DryRun {
+		collect(errors.New("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required unless DRY_RUN=true"))
 	}
 	if cfg.Debounce.MaxWait < cfg.Debounce.Window {
 		collect(fmt.Errorf("DEBOUNCE_MAX_WAIT (%s) must not be shorter than DEBOUNCE_WINDOW (%s)",
@@ -287,6 +304,21 @@ func envBool(key string, fallback bool) (bool, error) {
 		return fallback, fmt.Errorf("%s: %w", key, err)
 	}
 	return b, nil
+}
+
+// envInt64 parses an optional numeric environment variable. An unset or
+// empty value returns 0, the sentinel internal/githubapp treats as "resolve
+// the installation ID from the runner repository instead".
+func envInt64(key string) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return v, nil
 }
 
 func envLevel(key string, fallback slog.Level) (slog.Level, error) {

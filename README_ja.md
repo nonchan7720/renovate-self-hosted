@@ -27,12 +27,20 @@ flowchart LR
 | --- | --- | --- |
 | `issues` (`edited`) | Renovate の Dependency Dashboard issue のチェックボックスが未チェックからチェックに変わった | `dependency-dashboard-checkbox` |
 | `pull_request` (`edited`) | Renovate の PR 本文のチェックボックスが未チェックからチェックに変わった（rebase/retry のボックスなど） | `pull-request-checkbox` |
-| `push` | デフォルトブランチで Renovate の設定ファイルが変更された | `config-push` |
+| `push` | デフォルトブランチへの push で、Renovate の設定ファイルが変更された | `config-push` |
+| `push` | デフォルトブランチへの push（それ以外） | `default-branch-push` |
 
-push のペイロードに含まれるコミットは最大20件で、GitHub が切り詰めたかどうかを示す
-フィールドはありません。そのため上限に達している push は「設定が変更された可能性がある」
-とみなして実行します。ペイロードに載らなかったコミットでの変更を黙って取りこぼすよりは、
-余分に1回走るほうがましなので。
+デフォルトブランチへの push は、設定ファイルを変更したものに限らずすべて実行します。
+GitHub は PR のマージでも直接の push でも同じ `push` イベントを送ってきますし、
+どちらもデフォルトブランチを進めます。開いている Renovate の PR はそのどちらでも
+コンフリクトしうるので、リブランチできるのは新しい実行だけです。上の2つの reason の
+どちらになるかは、push が `PUSH_CONFIG_PATHS` に含まれるパスに触れたかどうかで決まります。
+
+push のペイロードに含まれるコミットは最大20件（`MaxPushCommits`）で、GitHub が
+切り詰めたかどうかを示すフィールドはありません。この上限はもう実行するかどうかを
+左右しません — デフォルトブランチへの push なら常に実行されます — 上限が効くのは
+パス検出がどこまで遡れるかだけで、上限より前のコミットで設定ファイルが変わっていても
+`config-push` ではなく `default-branch-push` として報告されることがあります。
 
 それ以外はすべて `200 {"status":"ignored"}` と理由を返します。GitHub の配信ログが
 赤くならず、なぜ何も起きなかったのかがそのまま分かります。
@@ -61,7 +69,9 @@ push のペイロードに含まれるコミットは最大20件で、GitHub が
 | --- | --- | --- |
 | `RENOVATE_WEBHOOK_SECRET` | — | **必須。** GitHub の Webhook と共有するシークレット。`X-Hub-Signature-256` の検証に使います。 |
 | `RUNNER_REPOSITORY` | — | **必須。** Renovate 実行ワークフローを持つリポジトリの `owner/repo`。 |
-| `GITHUB_TOKEN` | — | `DRY_RUN=true` でない限り**必須**。そのワークフローを dispatch できるトークン（`actions: write`）。 |
+| `GITHUB_APP_ID` | — | `DRY_RUN=true` でない限り**必須**。ランナーのワークフローを dispatch する GitHub App の App ID（または Client ID）。 |
+| `GITHUB_APP_PRIVATE_KEY` | — | `DRY_RUN=true` でない限り**必須**。その App の秘密鍵。PEM 形式で、PKCS#1 と PKCS#8 のどちらも可。 |
+| `GITHUB_APP_INSTALLATION_ID` | — | トークンを取得するインストール ID。未設定なら `RUNNER_REPOSITORY` 自身のインストールから解決します。Renovate を実行する App とは別の App で dispatch したい場合に設定します。 |
 | `RENOVATE_WEBHOOK_ADDR` | `:8080` | 待ち受けアドレス。 |
 | `RENOVATE_WEBHOOK_PATH` | `/webhook` | GitHub が POST するパス。 |
 | `RENOVATE_WEBHOOK_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`。 |
@@ -73,11 +83,17 @@ push のペイロードに含まれるコミットは最大20件で、GitHub が
 | `RUNNER_EXTRA_INPUTS` | — | 追加の入力を `key=value,key=value` 形式で。`=` を含まない断片は直前の値の続きとして扱われるため、値自体にカンマを含められます（`labels=area/foo,area/bar`）。ワークフローが宣言していない入力を送ると GitHub は dispatch 全体を拒否します。 |
 | `RENOVATE_BOT_LOGINS` | `renovate[bot],renovate-bot` | issue や PR の作成者として Renovate とみなすアカウント。 |
 | `ALLOWED_REPOSITORIES` | — | 任意の許可リスト。`owner/repo` または `owner/*`。未設定ならすべて許可。設定されているのに有効な項目が1つも無い場合は、黙って「全許可」に倒れず起動エラーになります。 |
-| `TRIGGER_ON_PUSH` | `true` | 設定ファイルの push で実行するかどうか。 |
+| `TRIGGER_ON_PUSH` | `true` | デフォルトブランチへの push で実行するかどうか。 |
 | `PUSH_CONFIG_PATHS` | `renovate.json`, `renovate.json5`, `.renovaterc*`, `.github/renovate.json*`, `.gitlab/renovate.json` | Renovate の設定ファイルとして扱うパス。 |
 | `DEBOUNCE_WINDOW` | `10s` | リポジトリの実行を dispatch するまでの待機時間。 |
 | `DEBOUNCE_MAX_WAIT` | `2m` | その待機時間の上限。イベントが途切れないリポジトリでも実行されます。 |
 | `DRY_RUN` | `false` | GitHub を呼ばず、dispatch する内容をログに出すだけにします。 |
+
+App に必要な権限は1つだけです。ランナーリポジトリへの **Actions: write**、
+`workflow_dispatch` を呼ぶためのものです。Renovate 自体が必要とする権限をそのまま
+全部与えてそこで止めてしまいがちですが、それだと dispatch が理由の分かりにくい
+403 で失敗します。サービスは自分で JWT に署名してインストールトークンを取得し、
+失効前に自動で更新するので、手動でローテーションする必要はありません。
 
 エンドポイントは Webhook のパスに加えて `GET /healthz` と `GET /readyz`。
 
@@ -98,21 +114,44 @@ Kubernetes の場合は [`deploy/helm/renovate-webhook`](deploy/helm/renovate-we
 ```sh
 kubectl create secret generic renovate-webhook \
   --from-literal=RENOVATE_WEBHOOK_SECRET=... \
-  --from-literal=GITHUB_TOKEN=...
+  --from-file=GITHUB_APP_PRIVATE_KEY=./app-private-key.pem
 
 helm install renovate-webhook deploy/helm/renovate-webhook \
   --set config.runnerRepository=acme/renovate-runner \
+  --set config.githubAppId=123456 \
   --set secret.existingSecret=renovate-webhook \
   --set ingress.enabled=true \
   --set ingress.hosts[0].host=renovate-webhook.example.com
 ```
 
 チャートに values からシークレットを作らせることもできます
-（`secret.webhookSecret`、`secret.githubToken`）。お試しにはこちらが手軽です。
+（`secret.webhookSecret`、`secret.githubAppPrivateKey`）。お試しにはこちらが手軽です。
+秘密鍵は複数行なので、`--set` ではなく values ファイル（`-f`/`--values`）で渡してください。
+`--set` だと PEM の改行が壊れます。
+
+```sh
+helm install renovate-webhook deploy/helm/renovate-webhook \
+  --set config.runnerRepository=acme/renovate-runner \
+  --set config.githubAppId=123456 \
+  --set secret.webhookSecret=... \
+  -f - <<'EOF'
+secret:
+  githubAppPrivateKey: |
+    -----BEGIN RSA PRIVATE KEY-----
+    ...
+    -----END RSA PRIVATE KEY-----
+EOF
+```
+
 `helm install --set config.dryRun=true` にすると、dispatch せずに判断だけをログに出します。
 その他の設定は [`values.yaml`](deploy/helm/renovate-webhook/values.yaml) に記載しています。
 必須の値が欠けている場合、チャートは CrashLoopBackOff になる代わりにインストール自体を
 失敗させます。
+
+`deploymentAnnotations` は Deployment 自身に付くアノテーションで、Pod テンプレートに付く
+`podAnnotations` とは別物です。Stakater Reloader のように Pod ではなく Deployment を
+監視するコントローラは、シークレットのローテーションに気付いて Pod を入れ替えるために
+こちらが必要です。
 
 リリース時にマルチアーキテクチャのイメージが
 `ghcr.io/nonchan7720/renovate-self-hosted` に、チャート自体が
@@ -123,6 +162,7 @@ helm install renovate-webhook deploy/helm/renovate-webhook \
 helm install renovate-webhook oci://ghcr.io/nonchan7720/charts/renovate-webhook \
   --version 0.1.0 \
   --set config.runnerRepository=acme/renovate-runner \
+  --set config.githubAppId=123456 \
   --set secret.existingSecret=renovate-webhook
 ```
 
@@ -132,7 +172,8 @@ Docker で動かす場合:
 docker build -t renovate-webhook .
 docker run --rm -p 8080:8080 \
   -e RENOVATE_WEBHOOK_SECRET=... \
-  -e GITHUB_TOKEN=... \
+  -e GITHUB_APP_ID=... \
+  -e GITHUB_APP_PRIVATE_KEY="$(cat app-private-key.pem)" \
   -e RUNNER_REPOSITORY=acme/renovate-runner \
   renovate-webhook
 ```
@@ -154,7 +195,15 @@ content type は `application/json`、シークレットは同じものを設定
 
 - **Issues** — Dependency Dashboard のチェックボックス
 - **Pull requests** — rebase/retry のチェックボックス
-- **Pushes** — 任意。Renovate の設定変更を拾う場合
+- **Pushes** — 任意（`TRIGGER_ON_PUSH`）。デフォルトブランチへの push を拾う場合
+
+GitHub App 自身にこれらのイベントを配信させることもできます。リポジトリごとに
+Webhook を設定せずに済みます。App の **Webhook URL** をこのサービスに向け、
+同じ3つのイベントを購読させ、**Webhook secret** を `RENOVATE_WEBHOOK_SECRET` と
+同じ値にします。App がインストールされているすべてのリポジトリのイベントが、この
+1つのエンドポイントに届くようになります。署名検証は変わりません
+（`X-Hub-Signature-256`）。サービス側はどちらの配信方法かを区別しませんし、
+区別する必要もありません。
 
 ## 開発
 
@@ -167,7 +216,8 @@ go test -race ./...
 golangci-lint run
 helm lint deploy/helm/renovate-webhook \
   --set config.runnerRepository=acme/renovate-runner \
-  --set secret.webhookSecret=example --set secret.githubToken=example
+  --set config.githubAppId=example \
+  --set secret.webhookSecret=example --set secret.githubAppPrivateKey=example
 ```
 
 リリースは [release-please](https://github.com/googleapis/release-please) が管理します。
@@ -194,6 +244,7 @@ helm lint deploy/helm/renovate-webhook \
 | --- | --- |
 | `internal/config` | 環境変数からの設定読み込みと検証 |
 | `internal/webhook` | 署名検証、イベントのルーティング、チェックボックスの差分検出 |
+| `internal/githubapp` | GitHub App の JWT 署名とインストールトークンのキャッシュ |
 | `internal/queue` | リポジトリ単位のデバウンス |
 | `internal/dispatch` | リトライ付きの `workflow_dispatch` クライアント |
 | `internal/server` | HTTP サーバ、ヘルスチェック、グレースフルシャットダウン |

@@ -236,13 +236,14 @@ func TestHandlerIgnoredDeliveries(t *testing.T) {
 				"commits":    []any{map[string]any{"id": "abc", "modified": []string{"renovate.json"}}},
 			},
 		},
-		"push without config changes": {
+		"push repository not allowed": {
 			event: "push",
 			payload: map[string]any{
 				"ref":        "refs/heads/main",
 				"repository": map[string]any{"full_name": "acme/api", "default_branch": "main"},
 				"commits":    []any{map[string]any{"id": "abc", "modified": []string{"README.md"}}},
 			},
+			trigger: config.Trigger{BotLogins: config.DefaultBotLogins, OnPush: true, AllowedRepositories: []string{"other/repo"}},
 		},
 		"push triggers disabled": {
 			event: "push",
@@ -298,81 +299,74 @@ func TestHandlerConfigPush(t *testing.T) {
 	if len(queue.jobs) != 1 {
 		t.Fatalf("enqueued %d jobs, want 1", len(queue.jobs))
 	}
-	if got := queue.jobs[0].Details; len(got) != 1 || got[0] != ".github/renovate.json" {
+	job := queue.jobs[0]
+	if len(job.Reasons) != 1 || job.Reasons[0] != dispatch.ReasonConfigPush {
+		t.Errorf("Reasons = %v, want [%s]", job.Reasons, dispatch.ReasonConfigPush)
+	}
+	if got := job.Details; len(got) != 1 || got[0] != ".github/renovate.json" {
 		t.Errorf("Details = %v, want [.github/renovate.json] without duplicates", got)
 	}
 }
 
-// TestHandlerTruncatedPush covers GitHub capping the commits array at 20 with
-// no field saying it did: a config change can hide in a commit the payload
-// never carried, so a push at the cap must run rather than be skipped.
-func TestHandlerTruncatedPush(t *testing.T) {
+// TestHandlerDefaultBranchPush covers a push to the default branch that does
+// not touch any Renovate config file: it still runs, because merging any
+// other pull request can leave an open Renovate PR conflicted, and only a
+// fresh Renovate run rebases it. PUSH_CONFIG_PATHS only picks the reason.
+func TestHandlerDefaultBranchPush(t *testing.T) {
 	t.Parallel()
 
-	commits := func(n int) []any {
-		out := make([]any, 0, n)
-		for i := range n {
-			out = append(out, map[string]any{
-				"id":       fmt.Sprintf("commit-%d", i),
-				"modified": []string{fmt.Sprintf("internal/thing%d.go", i)},
-			})
-		}
-		return out
+	h, queue := newTestHandler(t, testTrigger())
+	rec := post(t, h, "push", map[string]any{
+		"ref":        "refs/heads/main",
+		"repository": map[string]any{"full_name": "acme/api", "default_branch": "main"},
+		"commits":    []any{map[string]any{"id": "abc", "modified": []string{"README.md"}}},
+	})
+
+	if got := decodeStatus(t, rec); got != "queued" {
+		t.Fatalf("status = %q, want %q (%s)", got, "queued", rec.Body)
 	}
-	push := func(n int) map[string]any {
-		return map[string]any{
-			"ref":        "refs/heads/main",
-			"repository": map[string]any{"full_name": "acme/api", "default_branch": "main"},
-			"commits":    commits(n),
-		}
+	if len(queue.jobs) != 1 {
+		t.Fatalf("enqueued %d jobs, want 1", len(queue.jobs))
 	}
+	job := queue.jobs[0]
+	if len(job.Reasons) != 1 || job.Reasons[0] != dispatch.ReasonDefaultBranchPush {
+		t.Errorf("Reasons = %v, want [%s]", job.Reasons, dispatch.ReasonDefaultBranchPush)
+	}
+}
 
-	t.Run("at the cap", func(t *testing.T) {
-		t.Parallel()
+// TestHandlerPushPathDetectionAtCommitCap covers GitHub's push payload
+// capping the commits array at MaxPushCommits: path detection must still
+// pick a matching file out of a full commit list, so the reason stays
+// config-push rather than falling back to the default-branch-push reason.
+func TestHandlerPushPathDetectionAtCommitCap(t *testing.T) {
+	t.Parallel()
 
-		h, queue := newTestHandler(t, testTrigger())
-		rec := post(t, h, "push", push(webhook.MaxPushCommits))
+	commits := make([]any, 0, webhook.MaxPushCommits)
+	for i := range webhook.MaxPushCommits {
+		commits = append(commits, map[string]any{
+			"id":       fmt.Sprintf("commit-%d", i),
+			"modified": []string{fmt.Sprintf("internal/thing%d.go", i)},
+		})
+	}
+	commits[3].(map[string]any)["modified"] = []string{"renovate.json"}
 
-		if got := decodeStatus(t, rec); got != "queued" {
-			t.Fatalf("status = %q, want %q (%s)", got, "queued", rec.Body)
-		}
-		if len(queue.jobs) != 1 {
-			t.Fatalf("enqueued %d jobs, want 1", len(queue.jobs))
-		}
-		if got := queue.jobs[0].Details; len(got) != 1 || !strings.Contains(got[0], "truncated") {
-			t.Errorf("Details = %v, want the truncation to be explained", got)
-		}
+	h, queue := newTestHandler(t, testTrigger())
+	rec := post(t, h, "push", map[string]any{
+		"ref":        "refs/heads/main",
+		"repository": map[string]any{"full_name": "acme/api", "default_branch": "main"},
+		"commits":    commits,
 	})
 
-	t.Run("below the cap", func(t *testing.T) {
-		t.Parallel()
-
-		h, queue := newTestHandler(t, testTrigger())
-		rec := post(t, h, "push", push(webhook.MaxPushCommits-1))
-
-		if got := decodeStatus(t, rec); got != "ignored" {
-			t.Fatalf("status = %q, want %q (%s)", got, "ignored", rec.Body)
-		}
-		if len(queue.jobs) != 0 {
-			t.Fatalf("enqueued %d jobs, want 0", len(queue.jobs))
-		}
-	})
-
-	t.Run("at the cap with a real config change", func(t *testing.T) {
-		t.Parallel()
-
-		h, queue := newTestHandler(t, testTrigger())
-		payload := push(webhook.MaxPushCommits)
-		payload["commits"].([]any)[3].(map[string]any)["modified"] = []string{"renovate.json"}
-
-		rec := post(t, h, "push", payload)
-		if got := decodeStatus(t, rec); got != "queued" {
-			t.Fatalf("status = %q, want %q", got, "queued")
-		}
-		if got := queue.jobs[0].Details; len(got) != 1 || got[0] != "renovate.json" {
-			t.Errorf("Details = %v, want the actual path rather than the truncation note", got)
-		}
-	})
+	if got := decodeStatus(t, rec); got != "queued" {
+		t.Fatalf("status = %q, want %q (%s)", got, "queued", rec.Body)
+	}
+	job := queue.jobs[0]
+	if len(job.Reasons) != 1 || job.Reasons[0] != dispatch.ReasonConfigPush {
+		t.Errorf("Reasons = %v, want [%s]", job.Reasons, dispatch.ReasonConfigPush)
+	}
+	if got := job.Details; len(got) != 1 || got[0] != "renovate.json" {
+		t.Errorf("Details = %v, want [renovate.json]", got)
+	}
 }
 
 func TestHandlerRejectsBadRequests(t *testing.T) {

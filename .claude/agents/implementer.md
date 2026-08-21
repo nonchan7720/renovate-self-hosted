@@ -32,7 +32,8 @@ For Helm changes, at minimum:
 ```sh
 helm lint deploy/helm/renovate-webhook \
   --set config.runnerRepository=acme/renovate-runner \
-  --set secret.webhookSecret=example --set secret.githubToken=example
+  --set config.githubAppId=example \
+  --set secret.webhookSecret=example --set secret.githubAppPrivateKey=example
 helm template rw deploy/helm/renovate-webhook --set ...   # the paths you touched
 ```
 

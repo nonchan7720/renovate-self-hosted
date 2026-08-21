@@ -23,6 +23,12 @@ data:
   {{- with .Values.config.githubApiUrl }}
   GITHUB_API_URL: {{ . | quote }}
   {{- end }}
+  {{- with .Values.config.githubAppId }}
+  GITHUB_APP_ID: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.githubAppInstallationId }}
+  GITHUB_APP_INSTALLATION_ID: {{ . | quote }}
+  {{- end }}
   {{- with .Values.config.path }}
   RENOVATE_WEBHOOK_PATH: {{ . | quote }}
   {{- end }}
