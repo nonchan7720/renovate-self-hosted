@@ -25,6 +25,10 @@ serviceAccount:
   annotations: {}
   name: ""
 
+# Annotations on the Deployment itself, not the pod template (podAnnotations
+# below). Controllers that watch the Deployment rather than its pods, such as
+# Stakater Reloader, need them here to pick up a secret rotation.
+deploymentAnnotations: {}
 podAnnotations: {}
 podLabels: {}
 
@@ -99,16 +103,18 @@ topologySpreadConstraints: []
 # external secrets operator or SOPS would produce), or let the chart create
 # one from the values below.
 secret:
-  # Name of an existing secret holding the webhook secret and GitHub token.
-  # Its keys are read individually, so they can be named anything as long as
-  # the two key settings below match.
+  # Name of an existing secret holding the webhook secret and the GitHub App
+  # private key. Its keys are read individually, so they can be named
+  # anything as long as the two key settings below match.
   existingSecret: ""
   webhookSecretKey: RENOVATE_WEBHOOK_SECRET
-  githubTokenKey: GITHUB_TOKEN
+  githubAppPrivateKeyKey: GITHUB_APP_PRIVATE_KEY
   # Used only when existingSecret is empty.
   create: true
   webhookSecret: ""
-  githubToken: ""
+  # PEM-encoded GitHub App private key. Multi-line: use a literal block
+  # scalar ("|") with --values/-f rather than --set, which mangles newlines.
+  githubAppPrivateKey: ""
 
 # Everything else maps to the service's environment variables. Empty values
 # are left out so the binary's own defaults apply.
@@ -124,6 +130,11 @@ config:
   runnerExtraInputs: ""
   # Set to https://<host>/api/v3 for GitHub Enterprise Server.
   githubApiUrl: ""
+  # GitHub App ID. Required unless dryRun is true.
+  githubAppId: ""
+  # Installation ID. Leave empty to resolve it from runnerRepository at
+  # startup, which is the common case when the same App runs and dispatches.
+  githubAppInstallationId: ""
   path: ""
   logLevel: ""
   shutdownTimeout: ""

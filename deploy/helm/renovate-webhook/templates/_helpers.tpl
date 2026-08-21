@@ -48,7 +48,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Name of the secret holding the webhook secret and the GitHub token.
+Name of the secret holding the webhook secret and the GitHub App private key.
 */}}
 {{- define "renovate-webhook.secretName" -}}
 {{- if .Values.secret.existingSecret }}
@@ -76,8 +76,11 @@ surfaces at install time rather than in a CrashLoopBackOff.
 {{- if not .Values.secret.webhookSecret }}
 {{- fail "secret.webhookSecret is required unless secret.existingSecret is set" }}
 {{- end }}
-{{- if and (not .Values.secret.githubToken) (not .Values.config.dryRun) }}
-{{- fail "secret.githubToken is required unless config.dryRun is true or secret.existingSecret is set" }}
+{{- if and (not .Values.secret.githubAppPrivateKey) (not .Values.config.dryRun) }}
+{{- fail "secret.githubAppPrivateKey is required unless config.dryRun is true or secret.existingSecret is set" }}
 {{- end }}
+{{- end }}
+{{- if and (not .Values.config.githubAppId) (not .Values.config.dryRun) }}
+{{- fail "config.githubAppId is required unless config.dryRun is true" }}
 {{- end }}
 {{- end }}
